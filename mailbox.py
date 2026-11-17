@@ -286,15 +286,15 @@ def account():
         should_attempt = (
             bool(record.get('refresh'))
             and not record.get('write_upgrade_attempted')
+            and not request.environ.get(
+                'mailbox.write_upgrade_attempted'
+            )
         )
 
-        if should_attempt:
-            record['write_upgrade_attempted'] = True
-            record['write_ok'] = False
-
     if should_attempt:
-        # This session is serialized, but other sessions are not blocked
-        # by STORE_LOCK while the token endpoint request is running.
+        request.environ['mailbox.write_upgrade_attempted'] = True
+
+        # Nested lock order: record['lock'] -> STORE_LOCK; never acquire the record lock while holding STORE_LOCK.
         with record['lock']:
             with STORE_LOCK:
                 if STORE.get(sid) is not record:
@@ -302,44 +302,58 @@ def account():
                         'Your session expired. Sign in again.', 401
                     )
 
-                refresh = record['refresh']
-                client_id = record['cid']
-                claims = _token_claims(record.get('access', ''))
-                tenant_id = claims.get('tid')
-
-            try:
-                upgraded = upgrade_token(
-                    refresh, client_id, tenant_id
+                should_attempt = (
+                    bool(record.get('refresh'))
+                    and not record.get('write_upgrade_attempted')
                 )
 
-                if upgraded:
-                    expires = (
-                        time.time()
-                        + int(upgraded.get('expires_in', 3600))
+                if should_attempt:
+                    refresh = record['refresh']
+                    client_id = record['cid']
+                    tenant_id = _token_claims(
+                        record.get('access', '')
+                    ).get('tid')
+
+            if should_attempt:
+                updates = None
+
+                try:
+                    upgraded = upgrade_token(
+                        refresh, client_id, tenant_id
                     )
 
-                    with STORE_LOCK:
-                        if STORE.get(sid) is record:
-                            record.update(
-                                access=upgraded['access_token'],
-                                refresh=(
-                                    upgraded.get('refresh_token')
-                                    or record['refresh']
-                                ),
-                                expires=expires,
-                                scopes=(
-                                    upgraded.get('scope')
-                                    or record.get('scopes')
-                                ),
-                                granted_scp=upgraded.get('scp'),
-                                write_ok=True,
-                            )
-            except Exception:
-                app.logger.info(
-                    'TOKEN_UPGRADE_SKIPPED client_id=%s '
-                    'reason=exchange_error',
-                    client_id,
-                )
+                    if upgraded:
+                        updates = {
+                            'access': upgraded['access_token'],
+                            'refresh': (
+                                upgraded.get('refresh_token') or refresh
+                            ),
+                            'expires': (
+                                time.time()
+                                + int(upgraded.get('expires_in', 3600))
+                            ),
+                            'scopes': (
+                                upgraded.get('scope')
+                                or record.get('scopes')
+                            ),
+                            'granted_scp': upgraded.get('scp'),
+                            'write_ok': True,
+                            'write_upgrade_attempted': True,
+                        }
+                except Exception:
+                    app.logger.info(
+                        'TOKEN_UPGRADE_SKIPPED client_id=%s '
+                        'reason=exchange_error',
+                        client_id,
+                    )
+
+                with STORE_LOCK:
+                    if STORE.get(sid) is record:
+                        if updates is not None:
+                            record.update(updates)
+                        else:
+                            record['write_upgrade_attempted'] = False
+                            record['write_ok'] = False
 
     with STORE_LOCK:
         if STORE.get(sid) is not record:
@@ -897,20 +911,23 @@ def home():
         with open(path, encoding='utf-8') as fp:
             template = fp.read()
     except FileNotFoundError:
-        template = (
-            '<!doctype html><meta charset="utf-8"><title>Mailbox</title>'
-            '<h2>Mailbox viewer</h2><p>index.html not deployed.</p>'
-            '<p>Connected: {{ connected }}</p>'
+        return app.response_class(
+            'index.html is missing. Deploy it beside mailbox.py.',
+            status=500,
+            mimetype='text/plain',
         )
 
-    template = template.replace("'__CSRF__'", "{{ csrf|tojson }}")
+    csrf_json = (
+        json.dumps(csrf)
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace('&', '\\u0026')
+    )
+    template = template.replace("'__CSRF__'", csrf_json)
 
-    return render_template_string(
+    return app.response_class(
         template,
-        csrf=csrf,
-        connected=connected,
-        client_ids=client_ids,
-        oauth=bool(oauth),
+        mimetype='text/html',
     )
 
 
