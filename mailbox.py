@@ -1008,16 +1008,349 @@ def empty_junk(token):
         delete_call(token, f"/me/messages/{msg['id']}")
 
 
-@app.route("/", methods=["GET"])
-def home():
-    return """<!doctype html>
+import secrets
+from urllib.parse import quote
+
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
+)
+
+MAILBOX_PAGE = """<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <title>Mailbox Viewer</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mailbox Viewer</title>
+<style>
+body {
+    font:16px system-ui;
+    background:#f4f6fa;
+    margin:0;
+    color:#172033;
+}
+main {
+    max-width:1000px;
+    margin:30px auto;
+    padding:24px;
+    background:white;
+    border-radius:12px;
+}
+input,select,button {
+    font:inherit;
+    padding:10px;
+    box-sizing:border-box;
+}
+input,select {
+    display:block;
+    width:100%;
+    margin:8px 0 20px;
+}
+nav {
+    display:flex;
+    gap:16px;
+    flex-wrap:wrap;
+    margin:20px 0;
+}
+a { color:#1761ad; }
+article {
+    padding:16px 0;
+    border-bottom:1px solid #ddd;
+}
+.error {
+    background:#ffecec;
+    color:#9b2222;
+    padding:12px;
+}
+iframe {
+    width:100%;
+    height:500px;
+    border:1px solid #ddd;
+}
+pre {
+    white-space:pre-wrap;
+    overflow-wrap:anywhere;
+}
+</style>
 </head>
 <body>
-    <h1>Mailbox Viewer</h1>
-    <p>The mailbox service is running.</p>
+<main>
+<h1>Mailbox Viewer</h1>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if not connected %}
+
+<form method="post" action="{{ url_for('home') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+
+    <label>
+        Refresh token
+        <input type="password" name="refresh_token"
+               required autocomplete="off">
+    </label>
+
+    <label>
+        Client ID used to obtain your token
+        <select name="client_id">
+        {% for cid in client_ids %}
+            <option value="{{ cid }}">{{ cid }}</option>
+        {% endfor %}
+        </select>
+    </label>
+
+    <button>Open mailbox</button>
+</form>
+
+<p>Select the same client ID that issued your refresh token.</p>
+
+{% else %}
+
+<nav>
+{% for fid, label in folders %}
+    <a href="{{ url_for('home', folder=fid) }}">{{ label }}</a>
+{% endfor %}
+</nav>
+
+<form method="post" action="{{ url_for('mailbox_logout') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button>Sign out</button>
+</form>
+
+{% if mail %}
+
+<h2>{{ mail.get('subject') or '(No subject)' }}</h2>
+
+{% if mail.get('body', {}).get('contentType', '')|lower == 'html' %}
+    <iframe sandbox=""
+            referrerpolicy="no-referrer"
+            srcdoc="{{ safe_body }}"></iframe>
+{% else %}
+    <pre>{{ mail.get('body', {}).get('content', '') }}</pre>
+{% endif %}
+
+<a href="{{ url_for('home', folder=folder) }}">Back to messages</a>
+
+{% else %}
+
+<h2>{{ folder_label }}</h2>
+
+{% for m in messages %}
+<article>
+    <a href="{{ url_for('mailbox_message', mid=m['id'], folder=folder) }}">
+        {{ m.get('subject') or '(No subject)' }}
+    </a>
+    <p>
+        {{ (m.get('from') or {}).get('emailAddress', {}).get('address', '') }}
+        &middot;
+        {{ m.get('receivedDateTime', '') }}
+    </p>
+    <p>{{ m.get('bodyPreview', '') }}</p>
+</article>
+{% else %}
+    {% if not error %}
+        <p>No messages in this folder.</p>
+    {% endif %}
+{% endfor %}
+
+<nav>
+{% if skip %}
+    <a href="{{ url_for('home', folder=folder, skip=[0, skip-40]|max) }}">
+        Previous
+    </a>
+{% endif %}
+{% if more %}
+    <a href="{{ url_for('home', folder=folder, skip=skip+40) }}">
+        Next
+    </a>
+{% endif %}
+</nav>
+
+{% endif %}
+{% endif %}
+
+</main>
 </body>
-</html>""", 200
+</html>
+"""
+
+
+def mailbox_page(error=None, **values):
+    session.setdefault("csrf", secrets.token_urlsafe(32))
+
+    defaults = dict(
+        folder="inbox",
+        folder_label="Inbox",
+        messages=[],
+        mail=None,
+        safe_body="",
+        skip=0,
+        more=False,
+    )
+    defaults.update(values)
+
+    return render_template_string(
+        MAILBOX_PAGE,
+        error=error,
+        connected=bool(get_tokens()),
+        csrf=session["csrf"],
+        client_ids=CLIENT_IDS,
+        folders=FOLDERS,
+        **defaults,
+    )
+
+
+def mailbox_check_csrf():
+    expected = session.get("csrf", "")
+    supplied = request.form.get("csrf", "")
+    return bool(expected) and secrets.compare_digest(expected, supplied)
+
+
+@app.after_request
+def mailbox_no_cache(response):
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/", methods=["GET", "POST"])
+def home():
+    if request.method == "POST":
+        if not mailbox_check_csrf():
+            return mailbox_page(
+                error="Form expired. Reload and try again."
+            ), 400
+
+        refresh = request.form.get("refresh_token", "").strip()
+        cid = request.form.get("client_id", "")
+
+        if not refresh or cid not in CLIENT_IDS:
+            return mailbox_page(
+                error="Enter your refresh token and select its client ID."
+            ), 400
+
+        try:
+            response = requests.post(
+                TOKEN_EP,
+                data={
+                    "client_id": cid,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "scope": SCOPE,
+                },
+                timeout=20,
+            )
+
+            if response.status_code != 200:
+                return mailbox_page(
+                    error=(
+                        "Microsoft rejected the token. Check its client ID "
+                        "or use a fresh refresh token."
+                    )
+                ), 401
+
+            data = response.json()
+
+            if not data.get("access_token"):
+                return mailbox_page(
+                    error="Microsoft did not return an access token."
+                ), 502
+
+        except (requests.RequestException, ValueError):
+            return mailbox_page(
+                error="Could not connect to Microsoft. Please try again."
+            ), 502
+
+        STORE.pop(session.get("sid"), None)
+        session.clear()
+        session["sid"] = uuid.uuid4().hex
+
+        STORE[session["sid"]] = {
+            "access": data["access_token"],
+            "refresh": data.get("refresh_token") or refresh,
+            "client_id": cid,
+        }
+
+        return redirect(url_for("home"))
+
+    if not get_tokens():
+        return mailbox_page()
+
+    folder = request.args.get("folder", "inbox")
+
+    if folder not in dict(FOLDERS):
+        folder = "inbox"
+
+    try:
+        skip = max(0, int(request.args.get("skip", "0")))
+    except ValueError:
+        skip = 0
+
+    try:
+        data, status = receive_email(folder, top=40, skip=skip)
+    except (requests.RequestException, ValueError):
+        return mailbox_page(
+            error="Could not load messages. Please try again."
+        ), 502
+
+    if status != 200:
+        return mailbox_page(
+            error=(
+                f"Microsoft returned HTTP {status}. Your token may have "
+                "expired or lack Mail.Read permission."
+            )
+        ), status
+
+    return mailbox_page(
+        folder=folder,
+        folder_label=dict(FOLDERS)[folder],
+        messages=data.get("value", []),
+        skip=skip,
+        more=bool(data.get("@odata.nextLink")),
+    )
+
+
+@app.get("/message/<mid>")
+def mailbox_message(mid):
+    if not get_tokens():
+        return redirect(url_for("home"))
+
+    try:
+        mail, status = call("/me/messages/" + quote(mid, safe=""))
+    except (requests.RequestException, ValueError):
+        return mailbox_page(
+            error="Could not load this message. Please try again."
+        ), 502
+
+    if status != 200:
+        return mailbox_page(
+            error=f"Could not open this message (HTTP {status})."
+        ), status
+
+    policy = (
+        '<meta http-equiv="Content-Security-Policy" '
+        'content="default-src \'none\'; '
+        "style-src 'unsafe-inline'; img-src data:; "
+        'form-action \'none\'; base-uri \'none\'">'
+    )
+
+    return mailbox_page(
+        mail=mail,
+        safe_body=policy + mail.get("body", {}).get("content", ""),
+        folder=request.args.get("folder", "inbox"),
+    )
+
+
+@app.post("/logout")
+def mailbox_logout():
+    if not mailbox_check_csrf():
+        return mailbox_page(
+            error="Form expired. Reload and try again."
+        ), 400
+
+    STORE.pop(session.get("sid"), None)
+    session.clear()
+    return redirect(url_for("home"))
