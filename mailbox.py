@@ -1005,3 +1005,16 @@ def empty_junk(token):
                     params={"$select": "id", "$top": 100})
     for msg in messages.get("value", []):
         delete_call(token, f"/me/messages/{msg['id']}")
+        @app.route("/", methods=["GET"])
+def home():
+    return """<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Mailbox Viewer</title>
+</head>
+<body>
+    <h1>Mailbox Viewer</h1>
+    <p>The mailbox service is running.</p>
+</body>
+</html>""", 200
