@@ -6,7 +6,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-me-please")
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 TOKEN_EP = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-SCOPE = "https://outlook.office365.com/IMAP.AccessAsUser.All https://outlook.office365.com/SMTP.Send https://outlook.office.com/mail.readwrite offline_access"
+SCOPE = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
 CLIENT_ID = os.environ.get("CLIENT_ID", "27922004-5251-4030-b22d-91ecd9a37ea4")
 
 STORE = {}
