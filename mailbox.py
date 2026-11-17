@@ -1,13 +1,17 @@
 import base64
 import hashlib
+import json
+import html
 import os
 import re
 import secrets
 import threading
 import time
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit, unquote, parse_qsl
 
 import requests
+import bleach
+from bleach.css_sanitizer import CSSSanitizer
 from flask import Flask, jsonify, redirect, render_template_string, request, session
 
 app = Flask(__name__)
@@ -30,6 +34,10 @@ SCOPES = 'offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite 
 class ApiError(Exception):
     def __init__(self, message, status=400):
         self.message, self.status = message, status
+        self.code = 'request_failed'
+        self.feature = None
+        self.required = []
+        self.details = {}
 
 def token_request(values):
     r = requests.post(TOKEN_EP, data=values, timeout=20)
@@ -55,7 +63,7 @@ def save_login(data, cid, refresh='', managed=False):
         sid = secrets.token_urlsafe(32)
         session.update(sid=sid, csrf=secrets.token_urlsafe(32))
         STORE[sid] = dict(access=data['access_token'], refresh=data.get('refresh_token') or refresh,
-            cid=cid, managed=managed, used=now, expires=now+int(data.get('expires_in',3600)), lock=threading.RLock())
+            cid=cid, managed=managed, scopes=data.get('scope'), used=now, expires=now+int(data.get('expires_in',3600)), lock=threading.RLock())
 
 def account():
     with STORE_LOCK:
@@ -71,13 +79,14 @@ def renew(t):
         raise ApiError('Access token expired. Sign in again with a fresh token.',401)
     values = dict(client_id=t['cid'],grant_type='refresh_token',refresh_token=t['refresh'])
     if t['managed']:
-        values['scope'] = SCOPES
+        values['scope'] = t.get('scopes') or SCOPES
         if OAUTH_SECRET:
             values['client_secret'] = OAUTH_SECRET
     else:
         values['scope'] = 'https://graph.microsoft.com/.default offline_access'
     data = token_request(values)
     t.update(access=data['access_token'],refresh=data.get('refresh_token') or t['refresh'],
+             scopes=data.get('scope') or t.get('scopes'),
              expires=time.time()+int(data.get('expires_in',3600)))
 
 @app.before_request
@@ -96,11 +105,138 @@ def privacy(response):
 
 @app.errorhandler(ApiError)
 def api_error(e):
-    return jsonify(error=e.message),e.status
+    return jsonify(error=e.message,code=e.code,feature=e.feature,required=e.required,details=e.details),e.status
 
 @app.errorhandler(requests.RequestException)
 def network_error(e):
     return jsonify(error='Microsoft could not be reached. Please retry.'),502
+
+# Scope hints are for the interface only. Microsoft Graph enforces authorization.
+# Never treat decoded JWT hints as verified credentials.
+FEATURE_SCOPES = {
+    'mail_read': ['Mail.Read','Mail.ReadWrite'],
+    'mail_write': ['Mail.ReadWrite'],
+    'mail_send': ['Mail.Send'],
+    'rules_read': ['MailboxSettings.Read','MailboxSettings.ReadWrite'],
+    'rules_write': ['MailboxSettings.ReadWrite'],
+    'settings': ['MailboxSettings.ReadWrite'],
+    'calendar': ['Calendars.ReadWrite'],
+    'contacts': ['Contacts.ReadWrite'],
+    'tasks': ['Tasks.ReadWrite'],
+    'groups': ['GroupMember.Read.All','Directory.Read.All'],
+}
+
+def permission_for(path,method):
+    if 'messageRules' in path:
+        return 'inbox rules', FEATURE_SCOPES['rules_read' if method=='GET' else 'rules_write']
+    if 'mailboxSettings' in path:
+        return 'mailbox settings', ['MailboxSettings.Read' if method=='GET' else 'MailboxSettings.ReadWrite']
+    if '/todo' in path:
+        return 'Microsoft To Do', FEATURE_SCOPES['tasks']
+    if '/memberOf' in path:
+        return 'group memberships', FEATURE_SCOPES['groups']
+    if any(x in path for x in ['/events','/calendar']):
+        return 'calendar', ['Calendars.Read' if method=='GET' else 'Calendars.ReadWrite']
+    if '/contacts' in path:
+        return 'contacts', ['Contacts.Read' if method=='GET' else 'Contacts.ReadWrite']
+    if path.endswith('/sendMail') or path.endswith('/send') or path.endswith('/reply') or path.endswith('/replyAll') or path.endswith('/forward'):
+        return 'sending mail', ['Mail.Send']
+    return ('reading mail',['Mail.Read','Mail.ReadWrite']) if method=='GET' else ('managing mail',['Mail.ReadWrite'])
+
+def scope_hints(t):
+    if t.get('scopes'):
+        return [x.removeprefix('https://graph.microsoft.com/') for x in t['scopes'].split()]
+    try:
+        raw=t['access'].split('.')[1]
+        data=json.loads(base64.urlsafe_b64decode(raw+'='*(-len(raw)%4)))
+        scopes=data.get('scp')
+        return scopes.split() if isinstance(scopes,str) else None
+    except (ValueError,IndexError,UnicodeDecodeError,TypeError):
+        return None
+
+@app.get('/api/session')
+def session_info():
+    t=account()
+    scopes=scope_hints(t)
+    capabilities={name:{'state':'unknown' if scopes is None else ('available' if any(s in scopes for s in required) else 'missing'),
+                        'required':required} for name,required in FEATURE_SCOPES.items()}
+    return {'capabilities':capabilities,'scopes':scopes,'oauth':bool(OAUTH_CLIENT),
+            'refreshEnabled':bool(t['refresh']),'expiresAt':t['expires']}
+
+SAFE_TAGS = set(bleach.sanitizer.ALLOWED_TAGS) | set('p div span br hr h1 h2 h3 h4 h5 h6 table thead tbody tfoot tr td th colgroup col img font blockquote pre code ul ol li sup sub center strike s u caption'.split())
+CSS = CSSSanitizer(allowed_css_properties=['color','background-color','font-family','font-size','font-weight','font-style','text-align','text-decoration','line-height','padding','margin','border','border-collapse','width','max-width','height','vertical-align','white-space'])
+
+def link_scheme(value):
+    try:
+        return urlsplit(value.strip()).scheme.lower()
+    except ValueError:
+        return ''
+
+def safe_attribute(tag,name,value):
+    if name=='style':
+        return True
+    if tag=='a':
+        return name in ('href','title') and (name!='href' or link_scheme(value) in ('http','https','mailto','tel'))
+    if tag=='img':
+        return name in ('alt','width','height') or (name=='src' and (link_scheme(value) in ('http','https') or bool(re.fullmatch(r'data:image/(?:png|gif|jpeg|webp|bmp|avif);base64,[A-Za-z0-9+/=\s]+',value))))
+    return name in ('title','align','valign','colspan','rowspan','width','height','border','cellpadding','cellspacing','color','face','size')
+
+def safe_link(attrs,new=False):
+    href=attrs.get((None,'href'),'').strip()
+    if link_scheme(href) not in ('http','https','mailto','tel'):
+        return None
+    attrs[(None,'target')]='_blank'
+    attrs[(None,'rel')]='noopener noreferrer'
+    return attrs
+
+def safe_message_body(body, images=None):
+    source=body.get('content') or ''
+    if images:
+        source=re.sub(r'''cid:([^\s<>"']+)''', lambda match:images.get(unquote(html.unescape(match.group(1))).strip('<>').casefold(),match.group(0)),source,flags=re.I)
+    if body.get('contentType','').lower()!='html':
+        source='<pre>'+html.escape(source)+'</pre>'
+    # Drop executable/active containers completely before retaining ordinary formatting.
+    source=re.sub(r'<(script|style|iframe|object|svg|math|form)\b[^>]*>.*?</\1\s*>','',source,flags=re.I|re.S)
+    cleaned=bleach.clean(source,tags=SAFE_TAGS,attributes=safe_attribute,
+        protocols=['http','https','mailto','tel','data'],css_sanitizer=CSS,strip=True)
+    return bleach.linkifier.Linker(callbacks=[safe_link],skip_tags=['code'],parse_email=True).linkify(cleaned)
+
+def embedded_message_images(path, body):
+    source=body.get('content') or ''
+    wanted={unquote(html.unescape(cid)).strip('<>').casefold() for cid in re.findall(r"cid:([^\s<>\"']+)",source,flags=re.I)}
+    if not wanted:
+        return {},False
+    images={}
+    total=0
+    data=graph_request('GET',path+'/attachments',{'$top':100})
+    for page in range(20):
+        for attachment in data.get('value',[]):
+            cid=(attachment.get('contentId') or '').strip('<>').casefold()
+            if cid not in wanted:
+                continue
+            mime=(attachment.get('contentType') or '').split(';')[0].lower()
+            if mime not in ('image/png','image/jpeg','image/gif','image/webp','image/bmp','image/avif'):
+                continue
+            encoded=attachment.get('contentBytes')
+            if not encoded and attachment.get('id'):
+                detail=graph_request('GET',path+'/attachments/'+requests.utils.quote(attachment['id'],safe=''))
+                encoded=detail.get('contentBytes')
+            if not isinstance(encoded,str) or len(encoded)>16*1024*1024 or total+len(encoded)>32*1024*1024:
+                continue
+            encoded=re.sub(r'\s+','',encoded)
+            try:
+                base64.b64decode(encoded,validate=True)
+            except ValueError:
+                continue
+            images[cid]='data:'+mime+';base64,'+encoded
+            total+=len(encoded)
+        if wanted.issubset(images) or not data.get('@odata.nextLink'):
+            break
+        link=urlsplit(data['@odata.nextLink'])
+        if link.scheme!='https' or link.netloc!='graph.microsoft.com' or not link.path.startswith('/v1.0'+path+'/attachments'):
+            break
+        data=graph_request('GET',link.path[len('/v1.0'):],dict(parse_qsl(link.query)))
+    return images,not wanted.issubset(images)
 
 @app.get('/health')
 def health():
@@ -149,22 +285,25 @@ def microsoft_login():
         raise ApiError('Microsoft application registration is not configured.')
     state=secrets.token_urlsafe(32)
     verifier=secrets.token_urlsafe(64)
-    session.update(oauth_state=state,verifier=verifier)
+    extra={'tasks':'Tasks.ReadWrite','groups':'GroupMember.Read.All','shared':'Mail.ReadWrite.Shared Mail.Send.Shared Calendars.ReadWrite.Shared Contacts.ReadWrite.Shared'}
+    requested_scopes=SCOPES+' '+extra.get(request.args.get('feature'),'')
+    session.update(oauth_state=state,verifier=verifier,requested_scopes=requested_scopes)
     challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
     return redirect('https://login.microsoftonline.com/common/oauth2/v2.0/authorize?'+urlencode(dict(
         client_id=OAUTH_CLIENT,response_type='code',redirect_uri=PUBLIC_URL+'/auth/callback',
-        scope=SCOPES,state=state,code_challenge=challenge,code_challenge_method='S256')))
+        scope=requested_scopes,prompt='select_account',state=state,code_challenge=challenge,code_challenge_method='S256')))
 
 @app.get('/auth/callback')
 def callback():
     state=session.pop('oauth_state','')
     verifier=session.pop('verifier','')
+    requested_scopes=session.pop('requested_scopes',SCOPES)
     if not state or not secrets.compare_digest(state,request.args.get('state','')):
         raise ApiError('Sign-in state expired. Start sign-in again.')
     if not request.args.get('code'):
         raise ApiError('Microsoft sign-in was cancelled or denied.',401)
     values=dict(client_id=OAUTH_CLIENT,grant_type='authorization_code',code=request.args['code'],
-                code_verifier=verifier,redirect_uri=PUBLIC_URL+'/auth/callback',scope=SCOPES)
+                code_verifier=verifier,redirect_uri=PUBLIC_URL+'/auth/callback',scope=requested_scopes)
     if OAUTH_SECRET:
         values['client_secret']=OAUTH_SECRET
     data=token_request(values)
@@ -198,13 +337,34 @@ def graph_request(method,path,query=None,payload=None,binary=False):
                     code=err.get('code','GraphError')
                 except ValueError:
                     message,code='Microsoft rejected this operation.','GraphError'
+                    err={}
+                if r.status_code==403:
+                    feature, required = permission_for(path,method)
+                    error=ApiError('Microsoft denied the '+feature+' request. '+message,403)
+                    error.code='permission_required';error.feature=feature;error.required=required
+                    inner=err.get('innerError',{}) if isinstance(err,dict) else {}
+                    headers=r.headers if isinstance(r.headers,dict) or hasattr(r.headers,'items') else {}
+                    request_id=headers.get('request-id') or (inner.get('request-id') if isinstance(inner,dict) else None)
+                    error.details={'graphCode':code,'method':method,'path':path,'requestId':request_id if isinstance(request_id,str) else None,'scopeHint':scope_hints(t)}
+                    raise error
                 raise ApiError(code+': '+message,r.status_code)
             if binary:
                 return r.content,r.headers.get('Content-Type','application/octet-stream')
             if not r.content:
                 return {}
             try:
-                return r.json()
+                data=r.json()
+                if isinstance(data,dict) and isinstance(data.get('body'),dict):
+                    images={}
+                    if method=='GET' and re.fullmatch(r'/(?:me|users/[^/]+)/messages/[^/]+',path):
+                        try:
+                            images,missing=embedded_message_images(path,data['body'])
+                            if missing:
+                                data['imageNotice']='Some embedded images were unavailable or use an unsupported image format.'
+                        except (ApiError,requests.RequestException):
+                            data['imageNotice']='Some embedded pictures could not be retrieved. You can still read this message.'
+                    data['safeBody']=safe_message_body(data['body'],images)
+                return data
             except ValueError:
                 raise ApiError('Microsoft returned an unexpected response.',502)
 
