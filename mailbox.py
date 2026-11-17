@@ -1,6 +1,4 @@
-Replace **all of `mailbox.py`** with the code below using the code block’s **Copy** button. Keep **`index.html` unchanged**.
 
-```python
 import base64
 import hashlib
 import json
