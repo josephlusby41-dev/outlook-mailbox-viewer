@@ -17,6 +17,7 @@ from flask import (
 )
 
 app = Flask(__name__)
+app.logger.setLevel('INFO')
 app.secret_key = os.getenv('SECRET_KEY') or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -93,21 +94,151 @@ def token_request(values):
     if not data.get('access_token'):
         raise ApiError('Microsoft did not return an access token.', 502)
 
+    app.logger.info(
+        'TOKEN_EXCHANGE_OK client_id=%s',
+        values.get('client_id', ''),
+    )
     return data
 
 
-def upgrade_token(refresh_token, client_id):
-    response = requests.post(TOKEN_EP, data={
-        'client_id': client_id,
-        'grant_type': 'refresh_token',
-        'refresh_token': refresh_token,
-        'scope': WRITE_SCOPES,
-    }, timeout=20)
+def _token_claims(token):
+    """Decode diagnostic hints only. Microsoft validates authorization."""
+    try:
+        middle = token.split('.')[1]
+        claims = json.loads(
+            base64.urlsafe_b64decode(
+                middle + '=' * (-len(middle) % 4)
+            )
+        )
+        return claims if isinstance(claims, dict) else {}
+    except (ValueError, IndexError, TypeError, AttributeError):
+        return {}
 
-    data = response.json()
 
-    if response.ok and isinstance(data, dict) and data.get('access_token'):
-        return data
+def _log_token_scope(record, event):
+    claims = _token_claims(record.get('access', ''))
+    scopes = claims.get('scp') or claims.get('scope')
+    source = 'access_token_jwt'
+
+    if not scopes:
+        scopes = record.get('granted_scp')
+        source = 'token_response_scp' if scopes else 'unavailable'
+
+    if isinstance(scopes, list):
+        scopes = ' '.join(str(item) for item in scopes)
+
+    scopes = re.sub(
+        r'[^A-Za-z0-9_./: -]',
+        '',
+        str(scopes or 'unavailable'),
+    )[:3000]
+
+    app.logger.info(
+        'GRAPH_GRANTED_SCOPE event=%s client_id=%s source=%s scp=%s',
+        event,
+        record.get('cid', ''),
+        source,
+        scopes,
+    )
+
+
+def upgrade_token(refresh_token, client_id, tenant_id=None):
+    endpoints = []
+
+    if isinstance(tenant_id, str) and re.fullmatch(
+        r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}',
+        tenant_id,
+    ):
+        endpoints.append((
+            'tenant',
+            'https://login.microsoftonline.com/'
+            + tenant_id
+            + '/oauth2/v2.0/token',
+        ))
+
+    endpoints.append(('common', TOKEN_EP))
+
+    for label, endpoint in endpoints:
+        app.logger.info(
+            'TOKEN_ENDPOINT_ATTEMPT endpoint=%s client_id=%s tid_source=%s',
+            label,
+            client_id,
+            (
+                'access_token.tid'
+                if label == 'tenant'
+                else 'common_fallback_or_no_tid'
+            ),
+        )
+
+        try:
+            response = requests.post(
+                endpoint,
+                data={
+                    'client_id': client_id,
+                    'grant_type': 'refresh_token',
+                    'refresh_token': refresh_token,
+                    'scope': WRITE_SCOPES,
+                },
+                timeout=20,
+            )
+        except requests.RequestException:
+            app.logger.info(
+                'TOKEN_UPGRADE_FAILED endpoint=%s client_id=%s '
+                'status=network_error',
+                label,
+                client_id,
+            )
+            continue
+
+        app.logger.info(
+            'TOKEN_ENDPOINT_RESULT endpoint=%s client_id=%s status=%s',
+            label,
+            client_id,
+            response.status_code,
+        )
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        if (
+            response.ok
+            and isinstance(data, dict)
+            and data.get('access_token')
+        ):
+            app.logger.info(
+                'TOKEN_UPGRADE_EXCHANGE_OK endpoint=%s client_id=%s',
+                label,
+                client_id,
+            )
+            return data
+
+        text = response.text.replace(
+            refresh_token, '[REDACTED]'
+        )
+        text = re.sub(
+            r'("(?:access_token|refresh_token|id_token|client_secret)"'
+            r'\s*:\s*")[^"]*',
+            r'\1[REDACTED]',
+            text,
+            flags=re.I,
+        )
+        text = re.sub(
+            r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
+            '[REDACTED_JWT]',
+            text,
+        )
+        text = text.replace('\r', ' ').replace('\n', ' ')[:300]
+
+        app.logger.info(
+            'TOKEN_UPGRADE_FAILED endpoint=%s client_id=%s '
+            'status=%s body=%s',
+            label,
+            client_id,
+            response.status_code,
+            text,
+        )
 
     return None
 
@@ -132,6 +263,7 @@ def save_login(data, cid, refresh='', managed=False):
             'cid': cid,
             'managed': managed,
             'scopes': data.get('scope'),
+            'granted_scp': data.get('scp'),
             'used': now,
             'expires': now + int(data.get('expires_in', 3600)),
             'lock': threading.RLock(),
@@ -140,38 +272,84 @@ def save_login(data, cid, refresh='', managed=False):
 
 def account():
     with STORE_LOCK:
-        t = STORE.get(session.get('sid'))
+        sid = session.get('sid')
+        record = STORE.get(sid)
 
-        if not t or time.time() - t['used'] > 7200:
-            STORE.pop(session.get('sid'), None)
-            raise ApiError('Your session expired. Sign in again.', 401)
+        if not record or time.time() - record['used'] > 7200:
+            STORE.pop(sid, None)
+            raise ApiError(
+                'Your session expired. Sign in again.', 401
+            )
 
-        t['used'] = time.time()
+        record['used'] = time.time()
 
-        if t.get('refresh') and not t.get('write_upgrade_attempted'):
-            t['write_upgrade_attempted'] = True
-            t['write_ok'] = False
+        should_attempt = (
+            bool(record.get('refresh'))
+            and not record.get('write_upgrade_attempted')
+        )
+
+        if should_attempt:
+            record['write_upgrade_attempted'] = True
+            record['write_ok'] = False
+
+    if should_attempt:
+        # This session is serialized, but other sessions are not blocked
+        # by STORE_LOCK while the token endpoint request is running.
+        with record['lock']:
+            with STORE_LOCK:
+                if STORE.get(sid) is not record:
+                    raise ApiError(
+                        'Your session expired. Sign in again.', 401
+                    )
+
+                refresh = record['refresh']
+                client_id = record['cid']
+                claims = _token_claims(record.get('access', ''))
+                tenant_id = claims.get('tid')
 
             try:
-                upgraded = upgrade_token(t['refresh'], t['cid'])
+                upgraded = upgrade_token(
+                    refresh, client_id, tenant_id
+                )
 
                 if upgraded:
-                    t.update(
-                        access=upgraded['access_token'],
-                        refresh=(
-                            upgraded.get('refresh_token') or t['refresh']
-                        ),
-                        expires=(
-                            time.time()
-                            + int(upgraded.get('expires_in', 3600))
-                        ),
-                        scopes=upgraded.get('scope') or t.get('scopes'),
-                        write_ok=True,
+                    expires = (
+                        time.time()
+                        + int(upgraded.get('expires_in', 3600))
                     )
-            except Exception:
-                pass
 
-        return t
+                    with STORE_LOCK:
+                        if STORE.get(sid) is record:
+                            record.update(
+                                access=upgraded['access_token'],
+                                refresh=(
+                                    upgraded.get('refresh_token')
+                                    or record['refresh']
+                                ),
+                                expires=expires,
+                                scopes=(
+                                    upgraded.get('scope')
+                                    or record.get('scopes')
+                                ),
+                                granted_scp=upgraded.get('scp'),
+                                write_ok=True,
+                            )
+            except Exception:
+                app.logger.info(
+                    'TOKEN_UPGRADE_SKIPPED client_id=%s '
+                    'reason=exchange_error',
+                    client_id,
+                )
+
+    with STORE_LOCK:
+        if STORE.get(sid) is not record:
+            raise ApiError(
+                'Your session expired. Sign in again.', 401
+            )
+        snapshot = dict(record)
+
+    _log_token_scope(snapshot, 'account')
+    return record
 
 
 def renew(record):
@@ -192,7 +370,9 @@ def renew(record):
         if OAUTH_SECRET:
             values['client_secret'] = OAUTH_SECRET
     else:
-        values['scope'] = 'https://graph.microsoft.com/.default offline_access'
+        values['scope'] = (
+            'https://graph.microsoft.com/.default offline_access'
+        )
 
     data = token_request(values)
 
@@ -200,8 +380,10 @@ def renew(record):
         access=data['access_token'],
         refresh=data.get('refresh_token') or record['refresh'],
         scopes=data.get('scope') or record.get('scopes'),
+        granted_scp=data.get('scp'),
         expires=time.time() + int(data.get('expires_in', 3600)),
     )
+    _log_token_scope(record, 'renew')
 
 
 @app.before_request
@@ -248,7 +430,6 @@ def network_error(error):
     return jsonify(error=message, message=message), 502
 
 
-# Scope hints describe the interface. Microsoft enforces authorization.
 FEATURE_SCOPES = {
     'mail_read': ['Mail.Read', 'Mail.ReadWrite'],
     'mail_write': ['Mail.ReadWrite'],
@@ -546,7 +727,7 @@ def embedded_message_images(path, body):
         if (
             link.scheme != 'https'
             or link.netloc != 'graph.microsoft.com'
-            or not link.path.startswith('/v1.0' + path + '/attachments')
+            or link.path != '/v1.0' + path + '/attachments'
         ):
             break
 
@@ -733,27 +914,145 @@ def home():
     )
 
 
+def _redacted_log_body(text, *credentials):
+    text = str(text or '')
+
+    for credential in credentials:
+        if isinstance(credential, str) and credential:
+            text = text.replace(credential, '[REDACTED]')
+
+    text = re.sub(
+        r'("(?:access_token|refresh_token|id_token|client_secret)"'
+        r'\s*:\s*")[^"]*',
+        r'\1[REDACTED]',
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
+        '[REDACTED_JWT]',
+        text,
+    )
+
+    return text.replace('\r', ' ').replace('\n', ' ')[:300]
+
+
 @app.post('/login')
 def login():
-    values = request.get_json(silent=True) or {}
-    token = values.get('token', '').strip()
-    cid = values.get('client_id', '')
+    values = request.get_json(silent=True)
+
+    if not isinstance(values, dict):
+        _log_token_scope(
+            {'access': '', 'cid': ''},
+            'login_attempt',
+        )
+        raise ApiError('Send a JSON object with this request.')
+
+    token = str(values.get('token') or '').strip()
+    selected_cid = str(values.get('client_id') or '')
+    kind = values.get('kind')
+    claims = _token_claims(token) if kind == 'access' else {}
+
+    if kind == 'access':
+        cid = (
+            claims.get('azp')
+            or claims.get('appid')
+            or selected_cid
+        )
+    else:
+        cid = selected_cid
+
+    _log_token_scope(
+        {
+            'access': token if kind == 'access' else '',
+            'cid': cid,
+        },
+        'login_attempt',
+    )
 
     if not token:
         raise ApiError('Enter a token.')
 
-    if values.get('kind') == 'access':
-        probe = requests.get(
-            GRAPH + '/me',
-            params={'$select': 'id'},
-            headers={'Authorization': 'Bearer ' + token},
-            timeout=20,
+    profile = None
+
+    if kind == 'access':
+        endpoint = GRAPH + '/me'
+
+        try:
+            probe = requests.get(
+                endpoint,
+                params={
+                    '$select': 'displayName,mail,userPrincipalName'
+                },
+                headers={'Authorization': 'Bearer ' + token},
+                timeout=5,
+            )
+        except requests.RequestException:
+            app.logger.info(
+                'LOGIN_PROBE_RESULT endpoint=%s client_id=%s '
+                'status=network_error body=unavailable',
+                endpoint,
+                cid,
+            )
+            raise ApiError(
+                'Microsoft could not be reached to validate this token. '
+                'Please retry.',
+                502,
+            )
+
+        if probe.status_code != 200:
+            app.logger.info(
+                'LOGIN_PROBE_RESULT endpoint=%s client_id=%s '
+                'status=%s body=%s',
+                endpoint,
+                cid,
+                probe.status_code,
+                _redacted_log_body(probe.text, token),
+            )
+
+            if probe.status_code == 401:
+                raise ApiError('Token rejected by Microsoft.', 401)
+
+            if probe.status_code == 403:
+                return jsonify(
+                    ok=False,
+                    code='under_scoped',
+                    message=(
+                        'Token is valid but Microsoft refused /me (403). '
+                        'It likely lacks User.Read or the tenant restricts it. '
+                        'Use a refresh token instead.'
+                    ),
+                ), 403
+
+            status = (
+                probe.status_code
+                if 400 <= probe.status_code < 500
+                else 502
+            )
+
+            raise ApiError(
+                'Microsoft /me validation failed (HTTP '
+                + str(probe.status_code)
+                + ').',
+                status,
+            )
+
+        app.logger.info(
+            'LOGIN_PROBE_RESULT endpoint=%s client_id=%s status=200',
+            endpoint,
+            cid,
         )
 
-        if not probe.ok:
+        try:
+            profile = probe.json()
+        except ValueError:
             raise ApiError(
-                'That access token is expired or invalid for Microsoft Graph.',
-                401,
+                'Microsoft returned unreadable profile data.', 502
+            )
+
+        if not isinstance(profile, dict):
+            raise ApiError(
+                'Microsoft returned unexpected profile data.', 502
             )
 
         data = {'access_token': token}
@@ -767,14 +1066,38 @@ def login():
             'client_id': cid,
             'grant_type': 'refresh_token',
             'refresh_token': token,
-            'scope': 'https://graph.microsoft.com/.default offline_access',
+            'scope': (
+                'https://graph.microsoft.com/.default offline_access'
+            ),
         })
+
+    _log_token_scope(
+        {
+            'access': data['access_token'],
+            'cid': cid,
+            'granted_scp': data.get('scp'),
+        },
+        'login_accepted',
+    )
 
     save_login(
         data,
         cid,
-        token if values.get('kind') != 'access' else '',
+        token if kind != 'access' else '',
     )
+
+    if profile:
+        with STORE_LOCK:
+            record = STORE.get(session.get('sid'))
+
+            if record:
+                record['who'] = (
+                    profile.get('mail')
+                    or profile.get('userPrincipalName')
+                    or profile.get('displayName')
+                    or 'Mail Console'
+                )
+
     return {'ok': True}
 
 
@@ -790,7 +1113,9 @@ def logout():
 @app.get('/auth/microsoft')
 def microsoft_login():
     if not OAUTH_CLIENT:
-        raise ApiError('Microsoft application registration is not configured.')
+        raise ApiError(
+            'Microsoft application registration is not configured.'
+        )
 
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
@@ -845,7 +1170,9 @@ def callback():
         raise ApiError('Sign-in state expired. Start sign-in again.')
 
     if not request.args.get('code'):
-        raise ApiError('Microsoft sign-in was cancelled or denied.', 401)
+        raise ApiError(
+            'Microsoft sign-in was cancelled or denied.', 401
+        )
 
     values = {
         'client_id': OAUTH_CLIENT,
@@ -881,7 +1208,9 @@ def valid_path(path):
         or '#' in path
         or '\\' in path
     ):
-        raise ApiError('This Microsoft Graph resource is not enabled.')
+        raise ApiError(
+            'This Microsoft Graph resource is not enabled.'
+        )
 
     return path
 
@@ -927,7 +1256,9 @@ def graph_request(method, path, query=None, payload=None, binary=False):
                     feature, required = permission_for(path, method)
 
                     error = ApiError(
-                        'Microsoft denied the ' + feature + ' request. '
+                        'Microsoft denied the '
+                        + feature
+                        + ' request. '
                         + message,
                         403,
                     )
@@ -937,7 +1268,8 @@ def graph_request(method, path, query=None, payload=None, binary=False):
 
                     inner = (
                         details.get('innerError', {})
-                        if isinstance(details, dict) else {}
+                        if isinstance(details, dict)
+                        else {}
                     )
                     headers = (
                         response.headers
@@ -947,7 +1279,8 @@ def graph_request(method, path, query=None, payload=None, binary=False):
                     )
                     request_id = headers.get('request-id') or (
                         inner.get('request-id')
-                        if isinstance(inner, dict) else None
+                        if isinstance(inner, dict)
+                        else None
                     )
 
                     error.details = {
@@ -956,14 +1289,16 @@ def graph_request(method, path, query=None, payload=None, binary=False):
                         'path': path,
                         'requestId': (
                             request_id
-                            if isinstance(request_id, str) else None
+                            if isinstance(request_id, str)
+                            else None
                         ),
                         'scopeHint': scope_hints(record),
                     }
                     raise error
 
                 raise ApiError(
-                    code + ': ' + message, response.status_code
+                    code + ': ' + message,
+                    response.status_code,
                 )
 
             if binary:
@@ -1040,13 +1375,20 @@ def download():
     ):
         raise ApiError('Invalid download path.')
 
-    content, content_type = graph_request('GET', path, binary=True)
+    content, content_type = graph_request(
+        'GET', path, binary=True
+    )
 
     name = re.sub(
-        r'[^a-zA-Z0-9._ -]', '_', body.get('name', 'download')
+        r'[^a-zA-Z0-9._ -]',
+        '_',
+        body.get('name', 'download'),
     )[:120]
 
-    response = app.response_class(content, content_type=content_type)
+    response = app.response_class(
+        content,
+        content_type=content_type,
+    )
     response.headers['Content-Disposition'] = (
         'attachment; filename="' + name + '"'
     )
@@ -1075,10 +1417,14 @@ def source_zip():
             'README.txt', 'FEATURES.txt',
         ]:
             with open(os.path.join(root, name), 'rb') as fp:
-                archive.writestr('outlook-mailbox/' + name, fp.read())
+                archive.writestr(
+                    'outlook-mailbox/' + name,
+                    fp.read(),
+                )
 
     response = app.response_class(
-        buffer.getvalue(), content_type='application/zip'
+        buffer.getvalue(),
+        content_type='application/zip',
     )
     response.headers['Content-Disposition'] = (
         'attachment; filename="outlook-mailbox.zip"'
@@ -1124,15 +1470,20 @@ def _ui_collection(path, query=None):
             or link.path != '/v1.0' + path
         ):
             raise ApiError(
-                'Microsoft returned an unexpected pagination URL.', 502
+                'Microsoft returned an unexpected pagination URL.',
+                502,
             )
 
         result = graph_request(
-            'GET', path, dict(parse_qsl(link.query))
+            'GET',
+            path,
+            dict(parse_qsl(link.query)),
         )
         rows.extend(result.get('value', []))
 
-    raise ApiError('Too many pages returned. Narrow the request.', 400)
+    raise ApiError(
+        'Too many pages returned. Narrow the request.', 400
+    )
 
 
 @app.get('/api/folders')
@@ -1184,7 +1535,10 @@ def ui_messages():
 
 @app.get('/api/messages/<path:mid>')
 def ui_message(mid):
-    path = '/me/messages/' + requests.utils.quote(mid, safe='')
+    path = (
+        '/me/messages/'
+        + requests.utils.quote(mid, safe='')
+    )
     message = graph_request('GET', path)
 
     message['safeHtml'] = (
@@ -1198,7 +1552,8 @@ def ui_message(mid):
 @app.delete('/api/messages/<path:mid>')
 def ui_delete_message(mid):
     graph_request(
-        'DELETE', '/me/messages/' + requests.utils.quote(mid, safe='')
+        'DELETE',
+        '/me/messages/' + requests.utils.quote(mid, safe=''),
     )
     return jsonify(ok=True)
 
@@ -1223,14 +1578,18 @@ def ui_mark_read(mid):
 @app.post('/api/messages/<path:mid>/move')
 def ui_move_message(mid):
     data = _ui_json()
-    destination = str(data.get('destinationId') or '').strip()
+    destination = str(
+        data.get('destinationId') or ''
+    ).strip()
 
     if not destination:
         raise ApiError('Choose a destination folder.')
 
     moved = graph_request(
         'POST',
-        '/me/messages/' + requests.utils.quote(mid, safe='') + '/move',
+        '/me/messages/'
+        + requests.utils.quote(mid, safe='')
+        + '/move',
         payload={'destinationId': destination},
     )
 
@@ -1270,8 +1629,12 @@ def ui_send():
 
 @app.get('/api/rules')
 def ui_rules():
-    rules = _ui_collection('/me/mailFolders/inbox/messageRules')
-    rules.sort(key=lambda rule: rule.get('sequence', 0))
+    rules = _ui_collection(
+        '/me/mailFolders/inbox/messageRules'
+    )
+    rules.sort(
+        key=lambda rule: rule.get('sequence', 0)
+    )
     return jsonify(rules=rules)
 
 
@@ -1279,14 +1642,21 @@ def _ui_rule_payload(data, previous=None):
     previous = previous or {}
 
     name = str(
-        data.get('displayName', previous.get('displayName', '')) or ''
+        data.get(
+            'displayName',
+            previous.get('displayName', ''),
+        ) or ''
     ).strip()
 
     if not name:
         raise ApiError('Enter a rule name.')
 
-    conditions = dict(previous.get('conditions') or {})
-    actions = dict(previous.get('actions') or {})
+    conditions = dict(
+        previous.get('conditions') or {}
+    )
+    actions = dict(
+        previous.get('actions') or {}
+    )
 
     for input_name, graph_name in [
         ('fromContains', 'senderContains'),
@@ -1295,7 +1665,9 @@ def _ui_rule_payload(data, previous=None):
         if input_name in data:
             terms = [
                 term.strip()
-                for term in str(data[input_name] or '').split(',')
+                for term in str(
+                    data[input_name] or ''
+                ).split(',')
                 if term.strip()
             ]
 
@@ -1315,22 +1687,34 @@ def _ui_rule_payload(data, previous=None):
         ('markRead', 'markAsRead'),
     ]:
         if input_name in data:
-            if not isinstance(data[input_name], bool):
-                raise ApiError(input_name + ' must be true or false.')
+            if not isinstance(
+                data[input_name], bool
+            ):
+                raise ApiError(
+                    input_name + ' must be true or false.'
+                )
 
             actions.pop(graph_name, None)
 
             if data[input_name]:
                 actions[graph_name] = True
 
-    if actions.get('delete') and actions.get('moveToFolder'):
-        raise ApiError('Choose either moving or deleting, not both.')
+    if (
+        actions.get('delete')
+        and actions.get('moveToFolder')
+    ):
+        raise ApiError(
+            'Choose either moving or deleting, not both.'
+        )
 
     if not any(
-        value for key, value in actions.items()
+        value
+        for key, value in actions.items()
         if key != 'stopProcessingRules'
     ):
-        raise ApiError('Choose at least one rule action.')
+        raise ApiError(
+            'Choose at least one rule action.'
+        )
 
     payload = {
         'displayName': name,
@@ -1339,7 +1723,10 @@ def _ui_rule_payload(data, previous=None):
     }
 
     if not previous:
-        payload.update(sequence=1, isEnabled=True)
+        payload.update(
+            sequence=1,
+            isEnabled=True,
+        )
 
     return payload
 
@@ -1366,7 +1753,9 @@ def ui_update_rule(rid):
     previous = graph_request('GET', path)
     payload = _ui_rule_payload(data, previous)
 
-    return jsonify(graph_request('PATCH', path, payload=payload))
+    return jsonify(graph_request(
+        'PATCH', path, payload=payload
+    ))
 
 
 @app.delete('/api/rules/<path:rid>')
