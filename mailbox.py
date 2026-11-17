@@ -1,6 +1,3 @@
-Here is your full **`mailbox.py`** with only those three edits applied. Keep **`index.html` unchanged**.
-
-```python
 import base64
 import hashlib
 import json
