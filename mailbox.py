@@ -7,7 +7,18 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-me-please")
 GRAPH = "https://graph.microsoft.com/v1.0"
 TOKEN_EP = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 SCOPE = "https://graph.microsoft.com/.default offline_access"
-CLIENT_ID = os.environ.get("CLIENT_ID", "04b07795-8ddb-461a-bbee-02f9e1bf7b46")
+
+# Same rotation list as app.py - refresh tokens only work with the client ID that issued them
+CLIENT_IDS = [
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # Azure PowerShell
+    "1950a258-227b-4e31-a9cf-717495945fc2",  # Azure CLI
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # (kept first for compatibility)
+    "d3590ed6-52b3-4102-aeff-aad2292ab01c",  # Microsoft Office
+    "ab9b8c07-8f02-4f72-87fa-80105867a763",  # OneDrive iOS
+    "b26aadf8-566f-4478-926f-589f601d9c74",  # OneDrive
+    "27922004-16b8-4a39-9745-afe3546f733d",  # Office
+]
+CLIENT_IDS = list(dict.fromkeys(CLIENT_IDS))  # remove duplicates
 
 STORE = {}
 
@@ -18,30 +29,52 @@ def get_tokens():
     return STORE.get(session.get("sid"))
 
 def refresh_access(t):
-    r = requests.post(TOKEN_EP, data={
-        "client_id": CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": t["refresh"],
-        "scope": SCOPE,
-    }, timeout=20)
-    if r.status_code != 200:
-        return None
-    j = r.json()
-    t["access"] = j["access_token"]
-    if "refresh_token" in j:
-        t["refresh"] = j["refresh_token"]
-    return t["access"]
+    """Try every known client ID until one accepts the refresh token.
+    Remembers which client ID worked so future refreshes use it directly."""
+    for cid in CLIENT_IDS:
+        r = requests.post(TOKEN_EP, data={
+            "client_id": cid,
+            "grant_type": "refresh_token",
+            "refresh_token": t["refresh"],
+            "scope": SCOPE,
+        }, timeout=20)
+        if r.status_code == 200:
+            j = r.json()
+            t["access"] = j["access_token"]
+            if "refresh_token" in j:
+                t["refresh"] = j["refresh_token"]
+            t["client_id"] = cid
+            return t["access"]
+    return None
+
+def refresh_access_fast(t):
+    """Use the known-good client ID if we have one, otherwise full rotation."""
+    if t.get("client_id"):
+        r = requests.post(TOKEN_EP, data={
+            "client_id": t["client_id"],
+            "grant_type": "refresh_token",
+            "refresh_token": t["refresh"],
+            "scope": SCOPE,
+        }, timeout=20)
+        if r.status_code == 200:
+            j = r.json()
+            t["access"] = j["access_token"]
+            if "refresh_token" in j:
+                t["refresh"] = j["refresh_token"]
+            return t["access"]
+        t["client_id"] = None
+    return refresh_access(t)
 
 def call(path, params=None):
     t = get_tokens()
     if not t:
         return None, 401
-    tok = t.get("access") or refresh_access(t)
+    tok = t.get("access") or refresh_access_fast(t)
     for _ in range(2):
         r = requests.get(GRAPH + path, headers={"Authorization": f"Bearer {tok}"},
                          params=params, timeout=25)
         if r.status_code == 401 and t.get("refresh"):
-            tok = refresh_access(t)
+            tok = refresh_access_fast(t)
             continue
         if r.status_code >= 400:
             return {"error": r.text}, r.status_code
@@ -52,18 +85,25 @@ def post_call(path, payload):
     t = get_tokens()
     if not t:
         return {"error": "not logged in"}, 401
-    tok = t.get("access") or refresh_access(t)
+    tok = t.get("access") or refresh_access_fast(t)
     for _ in range(2):
         r = requests.post(GRAPH + path, headers={
             "Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
             json=payload, timeout=25)
         if r.status_code == 401 and t.get("refresh"):
-            tok = refresh_access(t)
+            tok = refresh_access_fast(t)
             continue
         if r.status_code >= 400:
             return {"error": r.text}, r.status_code
         return (r.json() if r.text else {}), 200
     return {"error": "auth failed"}, 401
+
+def delete_call(path):
+    t = get_tokens()
+    if not t:
+        return
+    tok = t.get("access") or refresh_access_fast(t)
+    requests.delete(GRAPH + path, headers={"Authorization": f"Bearer {tok}"}, timeout=20)
 
 # ---------- login ----------
 @app.route("/")
@@ -79,7 +119,7 @@ def login():
     t = {"refresh": token, "access": None}
     if not refresh_access(t):
         return render_template_string(LOGIN,
-            error="Token rejected. Make sure CLIENT_ID matches the one that issued it.")
+            error="Token rejected. Refresh token no longer valid or expired.")
     STORE[sid] = t
     session["sid"] = sid
     return redirect(url_for("inbox", folder="inbox"))
@@ -183,10 +223,7 @@ def rules():
 
 @app.route("/rules/<rid>/delete", methods=["POST"])
 def del_rule(rid):
-    t = get_tokens()
-    tok = t.get("access") or refresh_access(t)
-    requests.delete(GRAPH + f"/me/mailFolders/inbox/messageRules/{rid}",
-                    headers={"Authorization": f"Bearer {tok}"}, timeout=20)
+    delete_call(f"/me/mailFolders/inbox/messageRules/{rid}")
     return redirect(url_for("rules"))
 
 # ---------- templates (shared style) ----------
