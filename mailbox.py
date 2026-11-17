@@ -17,6 +17,7 @@ CLIENT_IDS = [
     "ab9b8c07-8f02-4f72-87fa-80105867a763",  # OneDrive iOS
     "b26aadf8-566f-4478-926f-589f601d9c74",  # OneDrive
     "27922004-16b8-4a39-9745-afe3546f733d",  # Office
+    "27922004-5251-4030-b22d-91ecd9a37ea4",
 ]
 CLIENT_IDS = list(dict.fromkeys(CLIENT_IDS))  # remove duplicates
 
@@ -1005,7 +1006,9 @@ def empty_junk(token):
                     params={"$select": "id", "$top": 100})
     for msg in messages.get("value", []):
         delete_call(token, f"/me/messages/{msg['id']}")
-        @app.route("/", methods=["GET"])
+
+
+@app.route("/", methods=["GET"])
 def home():
     return """<!doctype html>
 <html lang="en">
