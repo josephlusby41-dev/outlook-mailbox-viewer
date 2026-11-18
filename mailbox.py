@@ -334,6 +334,8 @@ def microsoft_login():
     scopes = SCOPES
     if request.args.get("apps") == "1":
         scopes += " " + " ".join(APP_SCOPES.values())
+    if request.args.get("area") == "suggestions":
+        scopes += " People.Read"
     session.update(oauth_state=state, oauth_verifier=verifier, oauth_scopes=scopes)
     return redirect(LOGIN + "/authorize?" + urlencode({
         "client_id": CLIENT_ID,
@@ -385,7 +387,7 @@ def logout():
 GRAPH_PATH = re.compile(
     r"/(?:me|users/[^/]+)"
     r"(?:/(?:mailFolders|messages|sendMail|mailboxSettings|calendarView|events|"
-    r"contacts|contactFolders|outlook|todo)(?:/.*)?)?"
+    r"contacts|contactFolders|outlook|todo|people)(?:/.*)?)?"
 )
 MESSAGE_PATH = re.compile(r"/me/messages/[^/]+")
 DOWNLOAD_PATH = re.compile(r"/me/messages/[^/]+/attachments/[^/]+/\$value")
@@ -604,7 +606,23 @@ def people():
         path += "/childFolders" if parents else "/contactFolders"
         fields = "id,displayName,parentFolderId"
 
-    view = ("people", path)
+    return people_page(record, path, {"$top": 100, "$select": fields})
+
+
+@app.get("/api/people/suggestions")
+def suggested_people():
+    record = current_account()
+    term = request.args.get("search", "").strip()
+    if len(term) > 120:
+        raise MailError("Search is limited to 120 characters.")
+    query = {"$top": 50, "$select": "id,displayName,scoredEmailAddresses,jobTitle,companyName"}
+    if term:
+        query["$search"] = '"' + term.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return people_page(record, "/me/people", query)
+
+
+def people_page(record, path, query):
+    view = ("people", path, tuple(query.items()))
     cursor = request.args.get("cursor")
     history = ()
     if cursor:
@@ -612,7 +630,7 @@ def people():
         result = graph("GET", path, continuation=saved["url"])
         history = saved["history"]
     else:
-        result = graph("GET", path, {"$top": 100, "$select": fields})
+        result = graph("GET", path, query)
 
     cursor = None
     if result.get("@odata.nextLink"):
