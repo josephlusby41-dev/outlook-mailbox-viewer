@@ -721,6 +721,14 @@ def correspondents():
     return jsonify(items=list(entries.values()), cursor=page["cursor"])
 
 
+MESSAGE_REFINERS = {
+    "attachments": lambda message: message.get("hasAttachments") is True,
+    "unread": lambda message: message.get("isRead") is False,
+    "flagged": lambda message: (message.get("flag") or {}).get("flagStatus") == "flagged",
+    "important": lambda message: message.get("importance") == "high",
+}
+
+
 @app.get("/api/messages")
 def messages():
     record = current_account()
@@ -730,6 +738,11 @@ def messages():
     )
     search = request.args.get("search", "").replace("\\", "").replace('"', "").strip()
     unread = not search and request.args.get("unread") == "1"
+    refiners = tuple(sorted(set(request.args.getlist("refine"))))
+    if any(name not in MESSAGE_REFINERS for name in refiners):
+        raise MailError("Unknown search filter.")
+    if search and request.args.get("unread") == "1":
+        refiners = tuple(sorted(set(refiners) | {"unread"}))
     query = {"$top": 25, "$select": MESSAGE_FIELDS}
 
     if search:
@@ -739,7 +752,7 @@ def messages():
     else:
         query["$orderby"] = "receivedDateTime desc"
 
-    view = (path, search, unread)
+    view = (path, search, unread, refiners)
     cursor = request.args.get("cursor")
     history = ()
     if cursor:
@@ -763,9 +776,11 @@ def messages():
         else:
             next_cursor = save_page(record, view, url, (*history[-7:], url))
 
-    return jsonify(
-        messages=result.get("value") or [], cursor=next_cursor, warning=warning
-    )
+    matches = [
+        message for message in (result.get("value") or [])
+        if all(MESSAGE_REFINERS[name](message) for name in refiners)
+    ]
+    return jsonify(messages=matches, cursor=next_cursor, warning=warning)
 
 
 SAFE_TAGS = set(bleach.sanitizer.ALLOWED_TAGS) | set(

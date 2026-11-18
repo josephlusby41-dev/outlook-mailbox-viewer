@@ -36,6 +36,10 @@ h1,h2,p{margin-top:0}
 .main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
 .actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .search input{flex:1;min-width:130px}
+.search-refiners{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:0;padding:0;margin:0}
+.search-refiners legend{float:left;margin:5px 8px 0 0;color:var(--muted);font-weight:600}
+.search-refiners label{display:flex;gap:5px;align-items:center;padding:4px 8px;border:1px solid var(--line);border-radius:14px;background:white}
+.search-refiners label:has(:checked){background:#def1e9;border-color:#76ad9d}
 .panes{display:grid;grid-template-columns:minmax(235px,38%) minmax(0,1fr);gap:12px;flex:1;min-height:0}
 .list,.reader{min-width:0;overflow:auto;background:white;border:1px solid var(--line);border-radius:14px}
 .list-head{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:white;z-index:1}
@@ -102,6 +106,13 @@ dialog .actions{margin-top:12px}
       <button class="primary" type="submit">Search</button>
       <button type="button" id="clearSearch">Clear</button>
     </form>
+    <fieldset class="search-refiners" id="refiners">
+      <legend>Filter results</legend>
+      <label><input type="checkbox" value="attachments"> Has attachments</label>
+      <label><input type="checkbox" value="unread"> Unread</label>
+      <label><input type="checkbox" value="flagged"> Flagged</label>
+      <label><input type="checkbox" value="important"> High importance</label>
+    </fieldset>
     <div class="actions" aria-label="Mailbox actions">
       <button id="refresh">Refresh</button>
       <button id="readAll">Mark read</button>
@@ -115,9 +126,6 @@ dialog .actions{margin-top:12px}
         <div class="list-head">
           <input type="checkbox" id="selectAll" aria-label="Select loaded messages">
           <h2 id="folderName">Inbox</h2>
-          <select id="filter" aria-label="Filter messages">
-            <option value="all">All mail</option><option value="unread">Unread</option>
-          </select>
         </div>
         <div id="rows" aria-busy="true"><p class="muted">Loading messages…</p></div>
         <div class="list-foot"><button id="more" hidden>Load more</button></div>
@@ -239,7 +247,7 @@ function renderFolders() {
         state.folder = folder.id;
         el('search').value = '';
         el('scope').value = 'folder';
-        el('filter').value = 'all';
+        for (const refiner of el('refiners').querySelectorAll(':checked')) refiner.checked = false;
         renderFolders();
         await loadMail();
       }, 'folder');
@@ -319,14 +327,14 @@ async function loadMail(append = false) {
     query.set('cursor', state.cursor);
   } else {
     const search = el('search').value.trim();
-    const wholeMailbox = search && el('scope').value === 'all';
+    const refiners = [...el('refiners').querySelectorAll(':checked')];
+    const wholeMailbox = Boolean(search || refiners.length) && el('scope').value === 'all';
     const folder = allFolders().find(item => item.id === state.folder);
     query.set('folder', wholeMailbox ? 'all' : state.folder);
     if (search) query.set('search', search);
-    else if (el('filter').value === 'unread') query.set('unread', '1');
-    el('filter').disabled = Boolean(search);
-    el('folderName').textContent = search
-      ? (wholeMailbox ? 'All folders · Search results' : 'Search results')
+    for (const refiner of refiners) query.append('refine', refiner.value);
+    el('folderName').textContent = search || refiners.length
+      ? (wholeMailbox ? 'All folders · Results' : (folder?.displayName || 'Inbox') + ' · Results')
       : folder?.displayName || 'Inbox';
     state.query = query.toString();
     state.cursor = null;
@@ -397,7 +405,9 @@ function renderMail() {
     row.append(selected, open);
     rows.append(row);
   }
-  if (!state.mail.length) rows.innerHTML = '<p class="muted">No messages found.</p>';
+  if (!state.mail.length) rows.innerHTML = state.cursor
+    ? '<p class="muted">No matches on this page. Select Load more to check older results.</p>'
+    : '<p class="muted">No messages found.</p>';
   updateSelection();
 }
 
@@ -443,7 +453,7 @@ async function openMessage(id) {
         await api(messageUrl(id) + '/read', 'POST', {isRead});
         const cached = state.mail.find(entry => entry.id === id);
         if (cached) cached.isRead = isRead;
-        if (el('filter').value === 'unread' && !el('filter').disabled && isRead) {
+        if (isRead && new URLSearchParams(state.query).getAll('refine').includes('unread')) {
           await loadMail();
         } else {
           renderMail();
@@ -626,8 +636,13 @@ function compose(mode = 'new', item) {
 }
 
 el('searchForm').onsubmit = event => { event.preventDefault(); loadMail(); };
-el('clearSearch').onclick = () => { el('search').value = ''; loadMail(); };
-el('filter').onchange = () => loadMail();
+el('clearSearch').onclick = () => {
+  el('search').value = '';
+  el('scope').value = 'folder';
+  for (const refiner of el('refiners').querySelectorAll(':checked')) refiner.checked = false;
+  loadMail();
+};
+el('refiners').onchange = () => loadMail();
 el('more').onclick = () => loadMail(true);
 el('refresh').onclick = refresh;
 el('newMail').onclick = () => compose();
