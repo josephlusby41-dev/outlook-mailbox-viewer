@@ -8,13 +8,13 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
 
 import bleach
 import requests
 from bleach.css_sanitizer import CSSSanitizer
 from flask import Flask, jsonify, redirect, render_template_string, request, session
-from itsdangerous import BadSignature, URLSafeTimedSerializer
+from mailbox_features import register_mailbox_features
 
 
 app = Flask(__name__)
@@ -40,6 +40,11 @@ CLIENT_IDS = [
     "1b730954-1685-4b74-9bfd-dac224a7b894",
 ]
 SCOPES = "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite"
+APP_SCOPES = {
+    "people": "Contacts.ReadWrite",
+    "calendar": "Calendars.ReadWrite",
+    "tasks": "Tasks.ReadWrite",
+}
 REFRESH_SCOPES = "https://graph.microsoft.com/.default offline_access"
 PROFILE_FIELDS = "displayName,mail,userPrincipalName"
 FOLDER_FIELDS = "id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
@@ -48,7 +53,8 @@ MESSAGE_FIELDS = (
     "hasAttachments,bodyPreview,importance,flag,isDraft"
 )
 RULES = "/me/mailFolders/inbox/messageRules"
-CURSORS = URLSafeTimedSerializer(app.secret_key, salt="mailbox-messages-v2")
+PAGE_LIFETIME = 1800
+PAGE_CACHE_LIMIT = 128
 ACCOUNTS = {}
 ACCOUNTS_LOCK = threading.RLock()
 IDLE_LIMIT = 7200
@@ -151,6 +157,7 @@ def save_account(data, client_id, *, refresh="", managed=False, name=""):
             "expires": expires_at(data),
             "used": now,
             "lock": threading.RLock(),
+            "pages": {},
         }
 
 
@@ -324,12 +331,15 @@ def microsoft_login():
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()
     ).decode().rstrip("=")
-    session.update(oauth_state=state, oauth_verifier=verifier)
+    scopes = SCOPES
+    if request.args.get("apps") == "1":
+        scopes += " " + " ".join(APP_SCOPES.values())
+    session.update(oauth_state=state, oauth_verifier=verifier, oauth_scopes=scopes)
     return redirect(LOGIN + "/authorize?" + urlencode({
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": PUBLIC_URL + "/auth/callback",
-        "scope": SCOPES,
+        "scope": scopes,
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
@@ -341,6 +351,7 @@ def microsoft_login():
 def microsoft_callback():
     state = session.pop("oauth_state", "")
     verifier = session.pop("oauth_verifier", "")
+    scopes = session.pop("oauth_scopes", SCOPES)
     if not state or not verifier or not secrets.compare_digest(
         state, request.args.get("state", "")
     ):
@@ -354,7 +365,7 @@ def microsoft_callback():
         "code": code,
         "code_verifier": verifier,
         "redirect_uri": PUBLIC_URL + "/auth/callback",
-        "scope": SCOPES,
+        "scope": scopes,
     }
     if CLIENT_SECRET:
         values["client_secret"] = CLIENT_SECRET
@@ -373,11 +384,16 @@ def logout():
 
 GRAPH_PATH = re.compile(
     r"/(?:me|users/[^/]+)"
-    r"(?:/(?:mailFolders|messages|sendMail|mailboxSettings)(?:/.*)?)?"
+    r"(?:/(?:mailFolders|messages|sendMail|mailboxSettings|calendarView|events|"
+    r"contacts|contactFolders|outlook|todo)(?:/.*)?)?"
 )
 MESSAGE_PATH = re.compile(r"/me/messages/[^/]+")
 DOWNLOAD_PATH = re.compile(r"/me/messages/[^/]+/attachments/[^/]+/\$value")
-FOLDER_MESSAGE_PATH = re.compile(r"/me/mailFolders/[^/]+/messages")
+MESSAGE_PAGE_PATH = re.compile(
+    r"/v1\.0/(?:me|users(?:/[^/]+|\('[^/]*'\)))/"
+    r"(?:mailFolders(?:/[^/]+|\('[^/]*'\))/)?messages/?",
+    re.IGNORECASE,
+)
 
 
 def validate_path(path):
@@ -391,8 +407,14 @@ def validate_path(path):
         raise MailError("Invalid Microsoft Graph path.")
 
 
-def graph(method, path, query=None, payload=None, binary=False):
+def graph(method, path, query=None, payload=None, binary=False, *, continuation=None):
     validate_path(path)
+    target = GRAPH + path
+    if continuation is not None:
+        if method != "GET":
+            raise MailError("A message continuation requires a read request.")
+        target = graph_page_url(continuation, path)
+        query = None
     record = current_account()
 
     with record["lock"]:
@@ -400,7 +422,7 @@ def graph(method, path, query=None, payload=None, binary=False):
             renew(record)
         for attempt in range(2):
             response = requests.request(
-                method, GRAPH + path, params=query, json=payload,
+                method, target, params=query, json=payload,
                 headers={"Authorization": "Bearer " + record["access"]},
                 timeout=25, allow_redirects=False,
             )
@@ -445,14 +467,14 @@ def account_info():
     )
 
 
-def next_page(link_value, original_path, *, folder_messages=False):
+def next_page(link_value, original_path):
     try:
         link = urlsplit(link_value)
     except (TypeError, ValueError):
         raise MailError("Microsoft returned an invalid next-page link.", 502) from None
 
     if (
-        link.scheme != "https" or link.netloc != "graph.microsoft.com"
+        link.scheme != "https" or link.netloc.lower() not in {"graph.microsoft.com", "graph.microsoft.com:443"}
         or not link.path.startswith("/v1.0/") or link.fragment
     ):
         raise MailError("Microsoft returned an unexpected next-page link.", 502)
@@ -461,15 +483,81 @@ def next_page(link_value, original_path, *, folder_messages=False):
     validate_path(path)
     expected = re.sub(r"^/users/[^/]+/", "/me/", unquote(original_path))
     actual = re.sub(r"^/users/[^/]+/", "/me/", unquote(path))
-    resolved_folder = (
-        folder_messages
-        and FOLDER_MESSAGE_PATH.fullmatch(expected)
-        and FOLDER_MESSAGE_PATH.fullmatch(actual)
-    )
-    if actual != expected and not resolved_folder:
+    if actual != expected:
         raise MailError("Microsoft returned a next page for a different view.", 502)
-
     return path, parse_qsl(link.query, keep_blank_values=True)
+
+
+def graph_page_url(value, original_path):
+    if (
+        not isinstance(value, str) or not value
+        or any(char.isspace() or ord(char) < 32 or char == "\\" for char in value)
+    ):
+        raise MailError("Invalid Graph message continuation.", 502)
+    try:
+        absolute = urljoin(GRAPH + original_path, value)
+        link = urlsplit(absolute)
+    except ValueError:
+        raise MailError("Invalid Graph message continuation.", 502) from None
+    if (
+        link.scheme != "https"
+        or link.netloc.lower() not in {"graph.microsoft.com", "graph.microsoft.com:443"}
+        or link.fragment
+    ):
+        raise MailError("Unexpected origin for Graph message continuation.", 502)
+
+    decoded = unquote(link.path)
+    if re.fullmatch(r"/me/(?:messages|mailFolders/[^/]+/messages)", original_path, re.I):
+        valid_resource = MESSAGE_PAGE_PATH.fullmatch(link.path)
+    else:
+        canonical = re.sub(
+            r"^/v1\.0/users(?:/[^/]+|\('[^/]*'\))",
+            "/v1.0/me", link.path, flags=re.I,
+        )
+        canonical = re.sub(
+            r"/(contactFolders|childFolders)\('([^/']+)'\)", r"/\1/\2",
+            canonical, flags=re.I,
+        )
+        valid_resource = unquote(canonical).rstrip("/").casefold() == (
+            "/v1.0" + unquote(original_path)
+        ).casefold()
+    if (
+        not valid_resource or not link.query
+        or any(char in decoded for char in "\\?#\r\n")
+        or any(segment in {".", ".."} for segment in decoded.split("/"))
+    ):
+        raise MailError("Unexpected path or missing query for Graph message continuation.", 502)
+    return absolute
+
+
+def save_page(record, view, url, history):
+    key = secrets.token_urlsafe(24)
+    with record["lock"]:
+        pages = record["pages"]
+        now = time.time()
+        for old_key, page in list(pages.items()):
+            if now >= page["expires"]:
+                pages.pop(old_key, None)
+        if len(pages) >= PAGE_CACHE_LIMIT:
+            pages.pop(next(iter(pages)))
+        pages[key] = {
+            "view": view,
+            "url": url,
+            "history": history,
+            "expires": now + PAGE_LIFETIME,
+        }
+    return key
+
+
+def get_page(record, key, view):
+    with record["lock"]:
+        page = record["pages"].get(key)
+        if not page or time.time() >= page["expires"]:
+            record["pages"].pop(key, None)
+            raise MailError("This page link expired. Refresh the mailbox.")
+        if page["view"] != view:
+            raise MailError("This page link belongs to a different mailbox view.")
+        return page
 
 
 def collection(path, query=None):
@@ -494,9 +582,50 @@ def folders():
     return jsonify(folders=collection(path, {"$top": 100, "$select": FOLDER_FIELDS}))
 
 
+@app.get("/api/people")
+def people():
+    record = current_account()
+    parents = request.args.getlist("parent")
+    if len(parents) > 64 or any(not parent or len(parent) > 2048 for parent in parents):
+        raise MailError("Invalid contact folder path.")
+    kind = request.args.get("kind", "contacts")
+    if kind not in {"contacts", "folders"}:
+        raise MailError("Choose contacts or contact folders.")
+
+    path = "/me"
+    if parents:
+        path += "/contactFolders/" + "/childFolders/".join(
+            quote(parent, safe="") for parent in parents
+        )
+    if kind == "contacts":
+        path += "/contacts"
+        fields = "id,displayName,givenName,surname,emailAddresses,companyName,jobTitle,mobilePhone,businessPhones"
+    else:
+        path += "/childFolders" if parents else "/contactFolders"
+        fields = "id,displayName,parentFolderId"
+
+    view = ("people", path)
+    cursor = request.args.get("cursor")
+    history = ()
+    if cursor:
+        saved = get_page(record, cursor, view)
+        result = graph("GET", path, continuation=saved["url"])
+        history = saved["history"]
+    else:
+        result = graph("GET", path, {"$top": 100, "$select": fields})
+
+    cursor = None
+    if result.get("@odata.nextLink"):
+        url = graph_page_url(result["@odata.nextLink"], path)
+        if url in history:
+            raise MailError("Microsoft repeated the contacts page. Try refreshing.", 502)
+        cursor = save_page(record, view, url, (*history[-7:], url))
+    return jsonify(items=result.get("value") or [], cursor=cursor)
+
+
 @app.get("/api/messages")
 def messages():
-    current_account()
+    record = current_account()
     folder = request.args.get("folder", "inbox").strip() or "inbox"
     path = "/me/messages" if folder == "all" else (
         f"/me/mailFolders/{quote(folder, safe='')}/messages"
@@ -512,32 +641,33 @@ def messages():
     else:
         query["$orderby"] = "receivedDateTime desc"
 
-    binding = hashlib.sha256(session["account"].encode()).hexdigest()
-    view = [binding, path, search, unread]
-    page_path = path
+    view = (path, search, unread)
     cursor = request.args.get("cursor")
-
+    history = ()
     if cursor:
-        try:
-            saved = CURSORS.loads(cursor, max_age=1800)
-        except BadSignature:
-            raise MailError("This page link expired. Refresh the mailbox.") from None
-        if saved.get("view") != view:
-            raise MailError("This page link belongs to a different mailbox view.")
-        page_path, query = saved["path"], saved["query"]
+        page = get_page(record, cursor, view)
+        result = graph("GET", path, continuation=page["url"])
+        history = page["history"]
+    else:
+        result = graph("GET", path, query)
 
-    result = graph("GET", page_path, query)
     continuation = result.get("@odata.nextLink")
+    next_cursor = None
     warning = None
-    cursor = None
     if continuation:
         try:
-            page_path, page_query = next_page(continuation, path, folder_messages=True)
-        except MailError:
+            url = graph_page_url(continuation, path)
+            if url in history:
+                raise MailError("Microsoft repeated a message continuation.", 502)
+        except MailError as error:
+            app.logger.warning("Message pagination stopped: %s", error)
             warning = "Messages loaded, but Microsoft returned an unusable next page."
         else:
-            cursor = CURSORS.dumps({"view": view, "path": page_path, "query": page_query})
-    return jsonify(messages=result.get("value") or [], cursor=cursor, warning=warning)
+            next_cursor = save_page(record, view, url, (*history[-7:], url))
+
+    return jsonify(
+        messages=result.get("value") or [], cursor=next_cursor, warning=warning
+    )
 
 
 SAFE_TAGS = set(bleach.sanitizer.ALLOWED_TAGS) | set(
@@ -726,17 +856,10 @@ def update_rule(rid):
 def delete_rule(rid):
     graph("DELETE", RULES + "/" + quote(rid, safe=""))
     return jsonify(ok=True)
-from mailbox_features import register_mailbox_features
 
-if "graph_request" in globals():
-    register_mailbox_features(app, graph_request, ApiError)
-else:
-    GRAPH_PATH = re.compile(
-        r"/(?:me|users/[^/]+)"
-        r"(?:/(?:mailFolders|messages|sendMail|mailboxSettings|calendarView|events|"
-        r"contacts|outlook|todo)(?:/.*)?)?"
-    )
-    register_mailbox_features(app, graph, MailError)
+
+register_mailbox_features(app, graph, MailError)
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))

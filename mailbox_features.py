@@ -38,17 +38,21 @@ def register_mailbox_features(app, graph, error):
                 r"/me/mailFolders(?:/[^/]+/(?:childFolders|move))?",
                 r"/me/(?:events|contacts)",
                 r"/me/todo/lists/[^/]+/tasks",
+                r"/me/contactFolders/[^/]+(?:/childFolders/[^/]+)*/contacts",
+                r"/me/mailFolders/inbox/messageRules",
             ],
             "PATCH": [
                 r"/me/(?:messages|mailFolders|events|contacts)/[^/]+",
                 r"/me/mailboxSettings",
                 r"/me/mailFolders/inbox/messageRules/[^/]+",
                 r"/me/todo/lists/[^/]+/tasks/[^/]+",
+                r"/me/contactFolders/[^/]+(?:/childFolders/[^/]+)*/contacts/[^/]+",
             ],
             "DELETE": [
                 r"/me/(?:mailFolders|events|contacts)/[^/]+",
                 r"/me/messages/[^/]+/attachments/[^/]+",
                 r"/me/todo/lists/[^/]+/tasks/[^/]+",
+                r"/me/contactFolders/[^/]+(?:/childFolders/[^/]+)*/contacts/[^/]+",
             ],
         }
 
