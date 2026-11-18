@@ -7,6 +7,7 @@ import re
 import secrets
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
 
@@ -23,6 +24,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=bool(os.getenv("RENDER")),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=365),
     MAX_CONTENT_LENGTH=6 * 1024 * 1024,
 )
 
@@ -57,7 +59,6 @@ PAGE_LIFETIME = 1800
 PAGE_CACHE_LIMIT = 128
 ACCOUNTS = {}
 ACCOUNTS_LOCK = threading.RLock()
-IDLE_LIMIT = 7200
 
 
 class MailError(Exception):
@@ -139,12 +140,14 @@ def display_name(profile):
 
 def save_account(data, client_id, *, refresh="", managed=False, name=""):
     now = time.time()
+    retention = app.permanent_session_lifetime.total_seconds()
     with ACCOUNTS_LOCK:
         for key, record in list(ACCOUNTS.items()):
-            if now - record["used"] > IDLE_LIMIT:
+            if now - record["used"] > retention:
                 ACCOUNTS.pop(key, None)
         ACCOUNTS.pop(session.get("account"), None)
         session.clear()
+        session.permanent = True
         key = secrets.token_urlsafe(32)
         session.update(account=key, csrf=secrets.token_urlsafe(32))
         ACCOUNTS[key] = {
@@ -166,7 +169,7 @@ def current_account():
     key = session.get("account")
     with ACCOUNTS_LOCK:
         record = ACCOUNTS.get(key)
-        if not record or time.time() - record["used"] > IDLE_LIMIT:
+        if not record:
             ACCOUNTS.pop(key, None)
             raise MailError("Your session expired. Sign in again.", 401)
         record["used"] = time.time()
