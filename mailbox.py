@@ -726,7 +726,17 @@ def update_rule(rid):
 def delete_rule(rid):
     graph("DELETE", RULES + "/" + quote(rid, safe=""))
     return jsonify(ok=True)
+from mailbox_features import register_mailbox_features
 
+if "graph_request" in globals():
+    register_mailbox_features(app, graph_request, ApiError)
+else:
+    GRAPH_PATH = re.compile(
+        r"/(?:me|users/[^/]+)"
+        r"(?:/(?:mailFolders|messages|sendMail|mailboxSettings|calendarView|events|"
+        r"contacts|outlook|todo)(?:/.*)?)?"
+    )
+    register_mailbox_features(app, graph, MailError)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
