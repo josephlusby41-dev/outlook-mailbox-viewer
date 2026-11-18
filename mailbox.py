@@ -209,12 +209,19 @@ def renew(record):
     }
     if record["managed"] and CLIENT_SECRET:
         values["client_secret"] = CLIENT_SECRET
-    data = token_request(values)
+    record["last_refresh_attempt"] = time.time()
+    try:
+        data = token_request(values)
+    except (MailError, requests.RequestException):
+        record["last_refresh_result"] = "failed"
+        raise
     record.update(
         access=data["access_token"],
         refresh=data.get("refresh_token") or record["refresh"],
         scopes=data.get("scope") or record.get("scopes"),
         expires=expires_at(data),
+        last_refresh_success=time.time(),
+        last_refresh_result="succeeded",
     )
 
 
@@ -492,6 +499,20 @@ def account_info():
         clientId=record["client"], refreshEnabled=bool(record["refresh"]),
         oauth=bool(CLIENT_ID),
     )
+
+
+@app.get("/api/session/connection")
+def connection_status():
+    record = current_account()
+    with record["lock"]:
+        return jsonify(
+            refreshEnabled=bool(record["refresh"]),
+            expiresAt=record["expires"],
+            serverTime=time.time(),
+            lastRefreshAttemptAt=record.get("last_refresh_attempt"),
+            lastSuccessfulRefreshAt=record.get("last_refresh_success"),
+            lastRefreshResult=record.get("last_refresh_result"),
+        )
 
 
 def next_page(link_value, original_path):

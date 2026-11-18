@@ -484,6 +484,7 @@
     const rules = action('Inbox rules', advancedRules);
     if (inRules) rules.setAttribute('aria-current', 'page');
     nav.append(rules, action('Mailbox settings', settings), action('Manage folders', folderTools),
+      action('Connection status', connectionStatus),
       action('Search history', historyPanel));
     return nav;
   }
@@ -1231,6 +1232,43 @@
       grant.href = '/auth/microsoft?apps=1';
       main.append(grant);
     }
+  }
+
+  async function connectionStatus() {
+    const main = panel('Connection status');
+    const status = element('p', 'Checking connection status…', 'muted');
+    status.setAttribute('role', 'status');
+    const details = element('dl');
+    main.append(status, details, action('Check again', check));
+
+    const formatTime = value => Number.isFinite(value)
+      ? new Date(value * 1000).toLocaleString()
+      : 'None this sign-in';
+
+    async function check() {
+      const data = await send('/api/session/connection');
+      if (!main.isConnected || !modal.open) return;
+      details.replaceChildren();
+      const remaining = Math.ceil((data.expiresAt - data.serverTime) / 60);
+      const expiry = remaining > 0
+        ? formatTime(data.expiresAt) + ' (about ' + remaining + ' min remaining)'
+        : formatTime(data.expiresAt) + ' (expired)';
+      const result = data.lastRefreshResult === 'succeeded' ? 'Succeeded'
+        : data.lastRefreshResult === 'failed' ? 'Failed' : 'No attempt yet';
+      for (const [name, value] of [
+        ['Automatic refresh', data.refreshEnabled ? 'Available' : 'Unavailable for this sign-in'],
+        ['Access token expires', expiry],
+        ['Last refresh attempt', formatTime(data.lastRefreshAttemptAt)],
+        ['Last refresh result', result],
+        ['Last successful refresh', formatTime(data.lastSuccessfulRefreshAt)],
+      ]) {
+        details.append(element('dt', name), element('dd', value));
+      }
+      status.textContent = data.refreshEnabled
+        ? 'Mail Console tries to refresh during mailbox requests when the access token is near expiry or Microsoft rejects it.'
+        : 'This sign-in has no refresh token. Sign in again when the access token expires.';
+    }
+    await check();
   }
 
   const header = document.querySelector('body > header');
