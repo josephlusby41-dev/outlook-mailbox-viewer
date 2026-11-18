@@ -663,7 +663,41 @@ def people_page(record, path, query):
         if url in history:
             raise MailError("Microsoft repeated the contacts page. Try refreshing.", 502)
         cursor = save_page(record, view, url, (*history[-7:], url))
-    return jsonify(items=result.get("value") or [], cursor=cursor)
+    return {"items": result.get("value") or [], "cursor": cursor}
+
+
+@app.get("/api/people/correspondents")
+def correspondents():
+    record = current_account()
+    source = request.args.get("source", "inbox")
+    if source not in {"inbox", "sentitems"}:
+        raise MailError("Choose Inbox or Sent Items.")
+
+    incoming = source == "inbox"
+    fields = "from,sender" if incoming else "toRecipients,ccRecipients,bccRecipients"
+    date = "receivedDateTime" if incoming else "sentDateTime"
+    page = people_page(record, f"/me/mailFolders/{source}/messages", {
+        "$top": 100, "$select": fields, "$orderby": date + " desc",
+    })
+    entries = {}
+    for message in page["items"]:
+        if incoming:
+            sender = message.get("from") or message.get("sender")
+            recipients = [sender] if sender else []
+        else:
+            recipients = [
+                recipient
+                for field in ("toRecipients", "ccRecipients", "bccRecipients")
+                for recipient in (message.get(field) or [])
+            ]
+        for recipient in recipients:
+            email = recipient.get("emailAddress") or {}
+            address = (email.get("address") or "").strip()
+            if "@" not in address:
+                continue
+            name = (email.get("name") or "").strip()
+            entries.setdefault(address.casefold(), {"address": address, "name": name})
+    return jsonify(items=list(entries.values()), cursor=page["cursor"])
 
 
 @app.get("/api/messages")

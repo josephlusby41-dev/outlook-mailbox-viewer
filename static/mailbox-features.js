@@ -806,92 +806,95 @@
     }));
   }
 
-  function outlookPeopleExport() {
-    const link = element('a', 'Open Outlook to download expanded people data');
-    link.href = 'https://outlook.cloud.microsoft/mail/options/general/export';
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    return link;
-  }
-
-  async function suggestedPeople() {
-    const main = panel('Suggested people');
+  async function mailCorrespondents() {
+    const main = panel('People from your email');
     modal.classList.add('feature-wide');
     const form = element('form', '', 'people-tools');
     const search = element('input');
     search.type = 'search';
-    search.maxLength = 120;
-    search.placeholder = 'Search names or email addresses';
-    search.setAttribute('aria-label', 'Search suggested people');
-    const submit = element('button', 'Search', 'act');
-    submit.type = 'submit';
-    form.append(search, submit, action('Saved contacts', people));
+    search.placeholder = 'Filter loaded names and addresses';
+    search.setAttribute('aria-label', 'Search email correspondents');
+    form.append(search, action('Saved contacts', people), action('Refresh', mailCorrespondents));
 
-    const status = element('p', 'Loading suggestions…', 'muted');
+    const status = element('p', '', 'muted');
     status.setAttribute('role', 'status');
     const list = element('div', '', 'people-list');
-    const connect = element('a', 'Sign in with Microsoft to allow People access');
-    connect.href = '/auth/microsoft?area=suggestions';
-    connect.hidden = true;
-    const more = action('Load more', () => load(true));
-    more.hidden = true;
-    main.append(form, status, connect, list, more, element('p', '', 'feature-actions'));
-    main.lastElementChild.append(outlookPeopleExport());
+    const scope = element('p', 'From Inbox and Sent Items. Load older messages to find more people.', 'muted');
+    const more = action('Load older messages', load);
+    main.append(form, scope, status, list, more);
 
-    const seen = new Set();
-    let cursor;
-    let term = '';
-    let version = 0;
-    async function load(append = false) {
-      if (append && !cursor) return;
-      const serial = ++version;
-      if (!append) {
-        term = search.value.trim();
-        cursor = null;
-        seen.clear();
-        list.replaceChildren();
+    const entries = new Map();
+    const sources = [
+      { id: 'inbox', label: 'Inbox', done: false, cursor: null },
+      { id: 'sentitems', label: 'Sent Items', done: false, cursor: null },
+    ];
+    let active = false;
+    let errors = [];
+    const current = () => main.isConnected && modal.open;
+
+    function render() {
+      if (!current()) return;
+      const filter = search.value.trim().toLowerCase();
+      const matches = [...entries.values()].filter(person =>
+        person.name.toLowerCase().includes(filter) || person.address.toLowerCase().includes(filter));
+      list.replaceChildren();
+      for (const person of matches) {
+        const row = action(person.name || person.address, () => {
+          modal.close();
+          if (typeof openCompose === 'function') openCompose();
+          else compose();
+          const recipient = field('cTo') || field('to');
+          if (recipient) recipient.value = person.address;
+        });
+        if (person.name && person.name !== person.address) row.append(element('small', person.address));
+        list.append(row);
       }
-      const params = new URLSearchParams({search:term});
-      if (cursor) params.set('cursor', cursor);
-      more.hidden = true;
-      connect.hidden = true;
-      status.textContent = 'Loading suggestions…';
-      try {
-        const page = await send('/api/people/suggestions?' + params);
-        if (!main.isConnected || !modal.open || serial !== version) return;
-        for (const person of page.items || []) {
-          const address = (person.scoredEmailAddresses || []).find(entry => entry.address)?.address;
-          if (!address || seen.has(address.toLowerCase())) continue;
-          seen.add(address.toLowerCase());
-          const row = action(person.displayName || address, () => {
-            modal.close();
-            if (typeof openCompose === 'function') openCompose();
-            else compose();
-            const recipient = field('cTo') || field('to');
-            if (recipient) recipient.value = address;
-          });
-          row.append(element('small', address));
-          list.append(row);
-        }
-        cursor = page.cursor;
-        more.hidden = !cursor;
-        status.textContent = seen.size
-          ? `${seen.size} Microsoft suggestions shown. Select a person to compose a message.`
-          : 'Microsoft returned no suggestions for this view.';
-      } catch (error) {
-        if (!main.isConnected || !modal.open || serial !== version) return;
-        status.textContent = error.message;
-        more.hidden = !cursor;
-        try {
-          const account = await send('/api/session');
-          if (main.isConnected && serial === version) connect.hidden = !account.oauth;
-        } catch (_) {}
+      const count = matches.length + ' shown · ' + entries.size + ' found';
+      status.textContent = [active ? 'Reading message addresses…' : count, ...errors].join(' ');
+      more.hidden = sources.every(source => source.done);
+      more.textContent = errors.length ? 'Retry loading messages' : 'Load older messages';
+      if (!matches.length && !active && !errors.length) {
+        list.append(element('p', filter ? 'No matching people among the loaded messages.' : 'No email addresses found in these messages.', 'muted'));
       }
     }
+
+    async function load() {
+      if (active) return;
+      active = true;
+      more.disabled = true;
+      errors = [];
+      render();
+      try {
+        for (const source of sources) {
+          if (!current()) return;
+          if (source.done) continue;
+          try {
+            const params = new URLSearchParams({ source: source.id });
+            if (source.cursor) params.set('cursor', source.cursor);
+            const page = await send('/api/people/correspondents?' + params);
+            if (!current()) return;
+            for (const person of page.items || []) {
+              const key = person.address.toLowerCase();
+              if (!entries.has(key) || (!entries.get(key).name && person.name)) entries.set(key, person);
+            }
+            source.cursor = page.cursor;
+            source.done = !source.cursor;
+          } catch (error) {
+            errors.push(source.label + ': ' + error.message);
+          }
+        }
+      } finally {
+        active = false;
+        more.disabled = false;
+        render();
+      }
+    }
+
+    search.oninput = render;
     form.onsubmit = event => {
       event.preventDefault();
       rememberSearch(search.value.trim(), 'people');
-      load();
+      render();
     };
     await load();
   }
@@ -924,7 +927,7 @@
     const detail = element('div', '', 'people-detail');
     layout.append(list, detail);
     filters.append(search, scope, newButton, exportButton, action('Refresh', people),
-      action('Suggested people', suggestedPeople));
+      action('People from your email', mailCorrespondents));
     main.append(filters, status, layout);
 
     const current = () => main.isConnected && modal.open;
@@ -1183,7 +1186,7 @@
     apps.setAttribute('aria-label','Mail Console apps');
     const mail = action('Mail', () => field('search')?.focus());
     mail.setAttribute('aria-current','page');
-    apps.append(mail, action('People', suggestedPeople), action('Calendar', () => records('calendar')),
+    apps.append(mail, action('People', mailCorrespondents), action('Calendar', () => records('calendar')),
       action('Tasks', tasks), action('Settings', settingsHub));
     header.insertBefore(apps, header.querySelector('#who, #account'));
     const existingRules = [...header.querySelectorAll('button')].find(control => control.textContent.trim() === 'Inbox rules');
