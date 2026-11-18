@@ -2,3 +2,4 @@ Flask>=3.0,<4
 requests>=2.32,<3
 bleach[css]>=6.2,<7
 itsdangerous>=2.2,<3
+gunicorn>=23,<27
