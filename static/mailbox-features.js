@@ -756,12 +756,17 @@
     return ids.length ? '/me/contactFolders/' + ids.join('/childFolders/') + '/contacts' : '/me/contacts';
   }
 
-  function exportContacts(contacts) {
+  function downloadCsv(filename, header, rows) {
     function cell(value) {
       let text = String(value ?? '');
       if (/^\s*[=+@\-]|^[\t\r\n]/u.test(text)) text = "'" + text;
       return '"' + text.replace(/"/g, '""') + '"';
     }
+    const csv = [header, ...rows].map(row => row.map(cell).join(',')).join('\r\n') + '\r\n';
+    saveFile(new Blob(['\uFEFF', csv], {type:'text/csv;charset=utf-8'}), filename);
+  }
+
+  function exportContacts(contacts) {
     const header = ['First Name', 'Last Name', 'Display Name', 'E-mail Address',
       'E-mail 2 Address', 'E-mail 3 Address', 'Company', 'Job Title',
       'Mobile Phone', 'Business Phone', 'Business Phone 2', 'Folder'];
@@ -771,8 +776,7 @@
       contact.emailAddresses?.[2]?.address, contact.companyName, contact.jobTitle,
       contact.mobilePhone, contact.businessPhones?.[0], contact.businessPhones?.[1], folder.label,
     ]);
-    const csv = [header, ...rows].map(row => row.map(cell).join(',')).join('\r\n') + '\r\n';
-    saveFile(new Blob(['\uFEFF', csv], {type:'text/csv;charset=utf-8'}), 'mailbox-contacts.csv');
+    downloadCsv('mailbox-contacts.csv', header, rows);
   }
 
   function contactName(contact) {
@@ -826,6 +830,8 @@
     const list = element('div', '', 'people-list');
     const scope = element('p', 'From Inbox and Sent Items. Load older messages to find more people.', 'muted');
     const more = action('Load older messages', load);
+    const exportAll = action('Export all email contacts', () => load(true));
+    form.append(exportAll);
     main.append(form, scope, status, list, more);
 
     const entries = new Map();
@@ -863,34 +869,47 @@
       }
     }
 
-    async function load() {
+    async function load(exporting = false) {
       if (active) return;
       active = true;
       more.disabled = true;
+      exportAll.disabled = true;
       errors = [];
       render();
       try {
-        for (const source of sources) {
-          if (!current()) return;
-          if (source.done) continue;
-          try {
-            const params = new URLSearchParams({ source: source.id });
-            if (source.cursor) params.set('cursor', source.cursor);
-            const page = await send('/api/people/correspondents?' + params);
+        do {
+          if (exporting && current()) status.textContent = 'Preparing CSV · ' + entries.size + ' unique addresses found';
+          for (const source of sources) {
             if (!current()) return;
-            for (const person of page.items || []) {
-              const key = person.address.toLowerCase();
-              if (!entries.has(key) || (!entries.get(key).name && person.name)) entries.set(key, person);
+            if (source.done) continue;
+            try {
+              const params = new URLSearchParams({ source: source.id });
+              if (source.cursor) params.set('cursor', source.cursor);
+              const page = await send('/api/people/correspondents?' + params);
+              if (!current()) return;
+              for (const person of page.items || []) {
+                const key = person.address.toLowerCase();
+                if (!entries.has(key) || (!entries.get(key).name && person.name)) entries.set(key, person);
+              }
+              source.cursor = page.cursor;
+              source.done = !source.cursor;
+            } catch (error) {
+              errors.push(source.label + ': ' + error.message);
             }
-            source.cursor = page.cursor;
-            source.done = !source.cursor;
-          } catch (error) {
-            errors.push(source.label + ': ' + error.message);
           }
+        } while (exporting && current() && !errors.length && sources.some(source => !source.done));
+        if (exporting && current() && !errors.length && sources.every(source => source.done)) {
+          if (!entries.size) {
+            errors.push('There are no email contacts to export.');
+            return;
+          }
+          const rows = [...entries.values()].map(person => [person.name || person.address, person.address]);
+          downloadCsv('mailbox-email-contacts.csv', ['Display Name', 'E-mail Address'], rows);
         }
       } finally {
         active = false;
         more.disabled = false;
+        exportAll.disabled = false;
         render();
       }
     }
