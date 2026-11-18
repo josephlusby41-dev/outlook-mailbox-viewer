@@ -1,6 +1,3 @@
-Copy this entire Python block into `mailbox.py` and save it beside `index.html` and `requirements.txt`. This is the full backend, not a patch script. It includes Microsoft sign-in, the search fix, unread filtering, and the API routes used by the mailbox interface. This inline version is condensed from the workspace source and hasn’t been tested against a live Microsoft 365 mailbox.
-
-```python
 import base64
 import hashlib
 import html
