@@ -48,6 +48,7 @@
     .people-list{display:grid;align-content:start;gap:4px;max-height:54vh;overflow:auto}
     .people-list button{display:grid;gap:4px;text-align:left;white-space:normal;overflow-wrap:anywhere}
     .people-list button[aria-current]{background:#def1e9;border-color:#76ad9d}
+    .people-select-row{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}
     .people-list small,.rule-row small{display:block;color:#526578;margin-top:3px}
     .people-detail{overflow-wrap:anywhere}
     .rule-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px;margin:12px 0;border:1px solid #dce5ec;border-radius:10px;padding:12px}
@@ -766,7 +767,7 @@
     saveFile(new Blob(['\uFEFF', csv], {type:'text/csv;charset=utf-8'}), filename);
   }
 
-  function exportContacts(contacts) {
+  function exportContacts(contacts, filename = 'mailbox-contacts.csv') {
     const header = ['First Name', 'Last Name', 'Display Name', 'E-mail Address',
       'E-mail 2 Address', 'E-mail 3 Address', 'Company', 'Job Title',
       'Mobile Phone', 'Business Phone', 'Business Phone 2', 'Folder'];
@@ -776,12 +777,27 @@
       contact.emailAddresses?.[2]?.address, contact.companyName, contact.jobTitle,
       contact.mobilePhone, contact.businessPhones?.[0], contact.businessPhones?.[1], folder.label,
     ]);
-    downloadCsv('mailbox-contacts.csv', header, rows);
+    downloadCsv(filename, header, rows);
   }
 
   function contactName(contact) {
     return contact.displayName || [contact.givenName, contact.surname].filter(Boolean).join(' ')
       || contact.emailAddresses?.[0]?.address || 'Unnamed contact';
+  }
+
+  function selectableContact(control, name, key, selected, onChange) {
+    const row = element('div', '', 'people-select-row');
+    const checkbox = element('input');
+    checkbox.type = 'checkbox';
+    checkbox.setAttribute('aria-label', 'Select ' + name);
+    checkbox.checked = selected.has(key);
+    checkbox.onchange = () => {
+      if (checkbox.checked) selected.add(key);
+      else selected.delete(key);
+      onChange();
+    };
+    row.append(checkbox, control);
+    return row;
   }
 
   function contactEditor(folder, contact) {
@@ -831,7 +847,11 @@
     const scope = element('p', 'From Inbox and Sent Items. Load older messages to find more people.', 'muted');
     const more = action('Load older messages', load);
     const exportAll = action('Export all email contacts', () => load(true));
-    form.append(exportAll);
+    const chosen = new Set();
+    const exportSelected = action('Export selected', () => {
+      exportEmailContacts([...chosen].map(key => entries.get(key)), 'mailbox-selected-email-contacts.csv');
+    });
+    form.append(exportSelected, exportAll);
     main.append(form, scope, status, list, more);
 
     const entries = new Map();
@@ -842,6 +862,16 @@
     let active = false;
     let errors = [];
     const current = () => main.isConnected && modal.open;
+
+    function exportEmailContacts(people, filename) {
+      const rows = people.map(person => [person.name || person.address, person.address]);
+      downloadCsv(filename, ['Display Name', 'E-mail Address'], rows);
+    }
+
+    function updateSelection() {
+      exportSelected.disabled = !chosen.size;
+      exportSelected.textContent = chosen.size ? 'Export selected (' + chosen.size + ')' : 'Export selected';
+    }
 
     function render() {
       if (!current()) return;
@@ -858,12 +888,13 @@
           if (recipient) recipient.value = person.address;
         });
         if (person.name && person.name !== person.address) row.append(element('small', person.address));
-        list.append(row);
+        list.append(selectableContact(row, person.address, person.address.toLowerCase(), chosen, updateSelection));
       }
       const count = matches.length + ' shown · ' + entries.size + ' found';
       status.textContent = [active ? 'Reading message addresses…' : count, ...errors].join(' ');
       more.hidden = sources.every(source => source.done);
       more.textContent = errors.length ? 'Retry loading messages' : 'Load older messages';
+      updateSelection();
       if (!matches.length && !active && !errors.length) {
         list.append(element('p', filter ? 'No matching people among the loaded messages.' : 'No email addresses found in these messages.', 'muted'));
       }
@@ -903,8 +934,7 @@
             errors.push('There are no email contacts to export.');
             return;
           }
-          const rows = [...entries.values()].map(person => [person.name || person.address, person.address]);
-          downloadCsv('mailbox-email-contacts.csv', ['Display Name', 'E-mail Address'], rows);
+          exportEmailContacts([...entries.values()], 'mailbox-email-contacts.csv');
         }
       } finally {
         active = false;
@@ -929,6 +959,7 @@
     const defaultFolder = { ids: [], label: 'Contacts' };
     const contactFolders = [defaultFolder];
     const contacts = new Map();
+    const chosen = new Set();
     let selected = null;
     let complete = false;
     let renderFrame = 0;
@@ -943,6 +974,9 @@
     search.placeholder = 'Search names, addresses, or companies';
     search.setAttribute('aria-label', 'Search contacts');
     const exportButton = action('Export CSV', () => exportContacts(byFolder()));
+    const exportSelected = action('Export selected', () => {
+      exportContacts([...chosen].map(key => contacts.get(key)), 'mailbox-selected-contacts.csv');
+    });
     const newButton = action('New contact', () => contactEditor(contactFolders[Number(scope.value)] || defaultFolder));
     const status = element('p', 'Loading saved contacts…', 'muted');
     status.setAttribute('role', 'status');
@@ -950,13 +984,18 @@
     const list = element('div', '', 'people-list');
     const detail = element('div', '', 'people-detail');
     layout.append(list, detail);
-    filters.append(search, scope, newButton, exportButton, action('Refresh', people),
+    filters.append(search, scope, newButton, exportSelected, exportButton, action('Refresh', people),
       action('People from your email', mailCorrespondents));
     main.append(filters, status, layout);
 
     const current = () => main.isConnected && modal.open;
     const byFolder = () => Array.from(contacts.values()).filter(item =>
       scope.value === 'all' || item.folder === contactFolders[Number(scope.value)]);
+
+    function updateSelection() {
+      exportSelected.disabled = !chosen.size;
+      exportSelected.textContent = chosen.size ? 'Export selected (' + chosen.size + ')' : 'Export selected';
+    }
 
     function render() {
       if (!current()) return;
@@ -973,6 +1012,7 @@
         ? `${visible.length} shown · ${records.length} in the selected scope`
         : `Loading saved contacts… ${contacts.size} found`;
       exportButton.disabled = !complete || !records.length;
+      updateSelection();
       if (selected && !visible.includes(selected)) selected = null;
       for (const record of visible) {
         const control = action(contactName(record.contact), () => {
@@ -984,7 +1024,7 @@
         if (selected === record) control.setAttribute('aria-current', 'true');
         const address = element('small', record.contact.emailAddresses?.[0]?.address || record.folder.label);
         control.append(address);
-        list.append(control);
+        list.append(selectableContact(control, contactName(record.contact), record.contact.id, chosen, updateSelection));
       }
       if (!visible.length && complete) list.append(element('p', 'No contacts found.', 'muted'));
       renderDetail();
