@@ -5,114 +5,80 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mail Console</title>
 <style>
-  :root {
-    color-scheme: light;
-    --navy: #112b41;
-    --ink: #1b2e40;
-    --muted: #556b7d;
-    --blue: #175e85;
-    --line: #dbe5ec;
-    --wash: #eef4f7;
-    --selected: #e1f0f5;
-  }
-  *, *::before, *::after { box-sizing: border-box; }
-  body { margin: 0; background: var(--wash); color: var(--ink); font: 14px system-ui, sans-serif; }
-  button, input, select, textarea { font: inherit; }
-  button { cursor: pointer; }
-  button:disabled { cursor: default; opacity: .55; }
-  :focus-visible { outline: 3px solid #c58319; outline-offset: 2px; }
-  [hidden] { display: none !important; }
-  button, input, select, textarea { border: 1px solid #b9cad6; border-radius: 8px; padding: 8px 10px; background: white; color: inherit; }
-  button:hover:not(:disabled) { background: var(--selected); }
-  .primary { background: var(--blue); color: white; border-color: var(--blue); font-weight: 650; }
-  .primary:hover:not(:disabled) { background: #104768; }
-  .danger { color: #a42636; }
-  .muted { color: var(--muted); }
-  .top {
-    min-height: 64px; display: flex; flex-wrap: wrap; align-items: center;
-    gap: 10px; padding: 12px 18px; color: white; background: var(--navy);
-  }
-  .top h1 { font-size: 19px; margin: 0 auto 0 0; }
-  .top button { color: white; background: #26475e; border-color: #47677c; }
-  .top button:hover:not(:disabled) { background: #365b72; }
-  #account { color: #d5e5ee; max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .shell {
-    display: grid; grid-template-columns: 205px minmax(0, 1fr);
-    height: calc(100dvh - 64px); gap: 14px; padding: 14px;
-  }
-  .sidebar { overflow: auto; }
-  .sidebar h2 { font-size: 13px; color: var(--muted); padding-left: 10px; margin: 18px 0 7px; }
-  .sidebar > button { width: 100%; text-align: left; }
-  .folder {
-    width: 100%; border-color: transparent; background: transparent;
-    display: flex; justify-content: space-between; gap: 8px; text-align: left;
-  }
-  .folder[aria-current="true"] { background: #dcebf1; font-weight: 650; }
-  .count { color: #155978; font-size: 12px; font-weight: 700; }
-  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 12px; }
-  .toolbar, .search, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-  .search { flex: 1; min-width: 235px; }
-  .search input { flex: 1; min-width: 115px; }
-  .panes {
-    display: grid; grid-template-columns: minmax(230px, 38%) minmax(0, 1fr);
-    flex: 1; gap: 12px; min-height: 0;
-  }
-  .list, .reader {
-    background: white; border: 1px solid var(--line); border-radius: 14px;
-    min-width: 0; overflow: auto;
-  }
-  .list-heading {
-    display: flex; align-items: center; gap: 10px; padding: 12px;
-    position: sticky; top: 0; z-index: 1; background: white; border-bottom: 1px solid var(--line);
-  }
-  .list-heading h2 { flex: 1; font-size: 15px; margin: 0; }
-  .list-footer, #rows > p { margin: 0; padding: 14px; }
-  .message {
-    display: grid; grid-template-columns: 20px minmax(0, 1fr);
-    gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line);
-  }
-  .message.unread { box-shadow: inset 3px 0 var(--blue); }
-  .message.unread .subject { font-weight: 720; color: #155779; }
-  .message.current { background: var(--selected); }
-  .message button { width: 100%; border: 0; background: transparent; padding: 0; text-align: left; min-width: 0; }
-  .message button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 3px; }
-  .message button .envelope { display: flex; justify-content: space-between; gap: 6px; }
-  .message strong { overflow: hidden; text-overflow: ellipsis; }
-  .message time { flex: none; font-size: 11px; color: var(--muted); }
-  .reader { padding: 22px; }
-  .reader h2 { margin: 0 0 12px; overflow-wrap: anywhere; }
-  .reader .actions { margin: 14px 0; }
-  .placeholder { height: 100%; display: grid; place-content: center; margin: 0; text-align: center; }
-  .message-body { overflow: auto; overflow-wrap: anywhere; line-height: 1.55; }
-  .message-body img { max-width: 100%; }
-  .message-body pre { white-space: pre-wrap; }
-  .back { display: none; }
-  dialog { border: 1px solid var(--line); border-radius: 14px; padding: 20px; width: min(600px, 94vw); max-height: 90dvh; }
-  dialog::backdrop { background: #102a4066; }
-  dialog h2 { margin: 0 0 14px; }
-  dialog label { display: block; margin: 10px 0; }
-  dialog input:not([type=checkbox]), dialog textarea, dialog select { display: block; width: 100%; margin-top: 4px; }
-  dialog textarea { min-height: 145px; resize: vertical; }
-  dialog .actions { justify-content: flex-end; margin-top: 15px; }
-  .rule { border-bottom: 1px solid var(--line); padding: 8px 0; }
-  #notice {
-    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
-    z-index: 4; color: white; background: var(--navy); border-radius: 8px;
-    padding: 10px 14px; max-width: 90vw;
-  }
-  @media (max-width: 760px) {
-    .shell { display: block; height: auto; padding: 10px; }
-    .sidebar { margin-bottom: 10px; }
-    .sidebar > button { width: auto; }
-    .sidebar h2 { display: none; }
-    #folders { display: flex; overflow: auto; margin-top: 8px; }
-    .folder { width: auto; flex: none; white-space: nowrap; }
-    .panes { display: block; }
-    .reader { display: none; }
-    .panes.reading .reader { display: block; }
-    .panes.reading .list { display: none; }
-    .back { display: inline-block; margin-bottom: 12px; }
-  }
+:root{--ink:#172c40;--muted:#536c7f;--line:#d7e4ec;--blue:#175e85;--wash:#edf4f7;--active:#deedf4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--wash);color:var(--ink);font:14px system-ui,sans-serif}
+button,input,select,textarea{font:inherit;color:inherit}
+button,select,input:not([type=checkbox]),textarea{background:white;border:1px solid #b2c5d3;border-radius:8px;padding:8px 10px}
+button{cursor:pointer}
+button:hover:not(:disabled){background:var(--active)}
+button:disabled{opacity:.55;cursor:default}
+:focus-visible{outline:3px solid #bc791a;outline-offset:2px}
+[hidden]{display:none!important}
+h1,h2,p{margin-top:0}
+.top{min-height:64px;background:#112b41;color:white;display:flex;align-items:center;gap:10px;padding:12px 18px;flex-wrap:wrap}
+.top h1{font-size:19px;margin:0 auto 0 0}
+.top button{background:#24475e;color:white;border-color:#496b80}
+.top button:hover{background:#365d76}
+#account{max-width:30vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d5e5ee}
+.shell{display:grid;grid-template-columns:210px minmax(0,1fr);gap:14px;padding:14px;height:calc(100dvh - 64px)}
+.sidebar{overflow:auto}
+.sidebar h2{font-size:13px;color:var(--muted);margin:17px 8px 8px}
+.sidebar>.primary{width:100%;text-align:left}
+.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:650}
+.primary:hover:not(:disabled){background:#104865}
+.folder-line{display:flex;align-items:center}
+.folder{display:flex;justify-content:space-between;align-items:center;gap:7px;flex:1;border-color:transparent;background:transparent;text-align:left;min-width:0}
+.folder[aria-current=true]{background:#dcebf1;font-weight:700}
+.toggle{border:0;background:transparent;padding:5px}
+.children{margin-left:12px;border-left:1px solid var(--line)}
+.count{font-size:12px;font-weight:700;color:var(--blue)}
+.main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
+.actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.search input{flex:1;min-width:130px}
+.panes{display:grid;grid-template-columns:minmax(235px,38%) minmax(0,1fr);gap:12px;flex:1;min-height:0}
+.list,.reader{min-width:0;overflow:auto;background:white;border:1px solid var(--line);border-radius:14px}
+.list-head{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:white;z-index:1}
+.list-head h2{font-size:15px;flex:1;margin:0}
+.mail{display:grid;grid-template-columns:19px minmax(0,1fr);gap:6px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.mail.current{background:var(--active)}
+.mail.unread{box-shadow:inset 3px 0 var(--blue)}
+.mail.unread .subject{font-weight:700;color:var(--blue)}
+.mail button{border:0;padding:0;background:transparent;text-align:left;min-width:0}
+.mail span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+.mail .from{display:flex;justify-content:space-between;gap:6px}
+.mail time{font-size:11px;color:var(--muted)}
+.muted{color:var(--muted)}
+#rows>p,.list-foot{padding:12px;margin:0}
+.reader{padding:22px}
+.reader h2{overflow-wrap:anywhere}
+.reader .actions{margin-bottom:12px}
+.message-body{overflow:auto;overflow-wrap:anywhere;line-height:1.5}
+.message-body img{max-width:100%}
+.message-body pre{white-space:pre-wrap}
+.back{display:none}
+.danger{color:#a1293b}
+dialog{width:min(600px,94vw);max-height:90dvh;padding:20px;border:1px solid var(--line);border-radius:14px}
+dialog::backdrop{background:#112b4166}
+dialog label{display:block;margin:9px 0}
+dialog input:not([type=checkbox]),dialog select,dialog textarea{display:block;width:100%;margin-top:4px}
+dialog textarea{min-height:145px;resize:vertical}
+dialog .actions{margin-top:12px}
+.rule{padding:8px 0;border-bottom:1px solid var(--line)}
+#notice{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:5;max-width:90vw;padding:10px 14px;border-radius:8px;background:#112b41;color:white}
+#dialogError{color:#a1293b;margin:10px 0 0}
+@media(max-width:760px){
+  .shell{display:block;height:auto;padding:10px}
+  .sidebar{margin-bottom:10px}
+  .sidebar>.primary{width:auto}
+  .sidebar h2{margin:8px}
+  #folders{max-height:155px;overflow:auto}
+  .panes{display:block}
+  .reader{display:none}
+  .panes.reading .reader{display:block;padding:14px}
+  .panes.reading .list{display:none}
+  .back{display:inline-block;margin-bottom:10px}
+}
 </style>
 </head>
 <body>
@@ -129,40 +95,34 @@
     <h2>Folders</h2>
     <nav id="folders" aria-label="Mail folders"></nav>
   </aside>
-
   <main class="main">
-    <div class="toolbar">
-      <form class="search" id="searchForm" role="search">
-        <input id="search" type="search" placeholder="Search mail" aria-label="Search mail">
-        <select id="scope" aria-label="Search scope">
-          <option value="folder">This folder</option>
-          <option value="all">All folders</option>
-        </select>
-        <button type="submit" class="primary">Search</button>
-        <button type="button" id="clearSearch">Clear</button>
-      </form>
-      <div class="actions" aria-label="Actions for selected messages">
-        <button id="refresh">Refresh</button>
-        <button id="markRead">Mark read</button>
-        <button id="markUnread">Mark unread</button>
-        <button id="archive">Archive</button>
-        <button id="move">Move…</button>
-        <button id="delete" class="danger">Delete</button>
-      </div>
+    <form class="actions search" id="searchForm" role="search">
+      <input type="search" id="search" placeholder="Search mail" aria-label="Search mail">
+      <select id="scope" aria-label="Search scope">
+        <option value="folder">This folder</option><option value="all">All folders</option>
+      </select>
+      <button class="primary" type="submit">Search</button>
+      <button type="button" id="clearSearch">Clear</button>
+    </form>
+    <div class="actions" aria-label="Mailbox actions">
+      <button id="refresh">Refresh</button>
+      <button id="readAll">Mark read</button>
+      <button id="unreadAll">Mark unread</button>
+      <button id="archive">Archive</button>
+      <button id="move">Move…</button>
+      <button id="remove" class="danger">Delete</button>
     </div>
-
     <div class="panes" id="panes">
-      <section class="list" aria-labelledby="listTitle">
-        <div class="list-heading">
-          <input id="selectAll" type="checkbox" aria-label="Select loaded messages">
-          <h2 id="listTitle">Inbox</h2>
+      <section class="list" aria-labelledby="folderName">
+        <div class="list-head">
+          <input type="checkbox" id="selectAll" aria-label="Select loaded messages">
+          <h2 id="folderName">Inbox</h2>
           <select id="filter" aria-label="Filter messages">
-            <option value="all">All mail</option>
-            <option value="unread">Unread</option>
+            <option value="all">All mail</option><option value="unread">Unread</option>
           </select>
         </div>
-        <div id="rows"></div>
-        <div class="list-footer"><button id="more" hidden>Load more</button></div>
+        <div id="rows" aria-busy="true"><p class="muted">Loading messages…</p></div>
+        <div class="list-foot"><button id="more" hidden>Load more</button></div>
       </section>
       <section class="reader" id="reader" aria-label="Reading pane"></section>
     </div>
@@ -174,30 +134,23 @@
 
 <script>
 const CSRF = '__CSRF__';
-const byId = id => document.getElementById(id);
+const el = id => document.getElementById(id);
 const state = {
-  folder: 'inbox', folders: [], messages: [], selected: new Set(),
-  cursor: null, query: '', openId: null, listRequest: 0, readerRequest: 0,
+  folder: 'inbox', roots: [], children: new Map(), expanded: new Set(),
+  mail: [], selected: new Set(), cursor: null, query: '', open: null,
+  listVersion: 0, readerVersion: 0, folderVersion: 0,
 };
-
-function escapeHtml(value) {
-  const node = document.createElement('span');
-  node.textContent = value ?? '';
-  return node.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function notice(message) {
-  const node = byId('notice');
-  node.textContent = message;
-  node.hidden = false;
-  clearTimeout(node.timer);
-  node.timer = setTimeout(() => { node.hidden = true; }, 4500);
-}
+const escapeHtml = value => String(value ?? '').replace(
+  /[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]),
+);
+const byAddress = recipient => recipient?.emailAddress || {};
+const messageUrl = id => '/api/messages/' + encodeURIComponent(id);
+const graphUrl = id => '/me/messages/' + encodeURIComponent(id);
+const allFolders = () => [...state.roots, ...Array.from(state.children.values()).flat()];
 
 async function request(path, method = 'GET', data) {
   const response = await fetch(path, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+    method, headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF},
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   if (!response.ok) {
@@ -212,122 +165,174 @@ async function api(path, method, data) {
   return response.status === 204 ? {} : response.json();
 }
 
-function graph(method, path, payload, query) {
-  return api('/api/graph', 'POST', { method, path, payload, query });
+function graph(method, path, payload) {
+  return api('/api/graph', 'POST', {method, path, payload});
 }
 
-function messageUrl(id) {
-  return '/api/messages/' + encodeURIComponent(id);
+function notice(message) {
+  const box = el('notice');
+  const dialogError = el('dialogError');
+  if (el('dialog').open && dialogError) {
+    dialogError.textContent = message;
+    return;
+  }
+  box.textContent = message;
+  box.hidden = false;
+  clearTimeout(box.timer);
+  box.timer = setTimeout(() => { box.hidden = true; }, 5500);
 }
 
-function graphMessage(id) {
-  return '/me/messages/' + encodeURIComponent(id);
+function button(label, action, className = '') {
+  const control = document.createElement('button');
+  control.type = 'button';
+  control.className = className;
+  control.textContent = label;
+  control.onclick = async () => {
+    control.disabled = true;
+    try { await action(); }
+    catch (error) { notice(error.message); }
+    finally { control.disabled = false; }
+  };
+  return control;
 }
 
-function addressOf(recipient) {
-  return recipient?.emailAddress || {};
-}
-
-function recipients(value) {
-  return value.split(/[,;]/).map(address => address.trim()).filter(Boolean)
-    .map(address => ({ emailAddress: { address } }));
+function dialog(title, markup) {
+  const box = el('dialog');
+  box.innerHTML = `<h2 id="dialogTitle">${escapeHtml(title)}</h2>${markup}<p id="dialogError" role="alert"></p>`;
+  if (!box.open) box.showModal();
+  box.querySelector('[data-close]')?.addEventListener('click', () => box.close());
 }
 
 function dateLabel(value, short = false) {
   const date = new Date(value);
   if (!value || Number.isNaN(+date)) return '';
   return short
-    ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    ? date.toLocaleDateString(undefined, {month:'short',day:'numeric'})
     : date.toLocaleString();
 }
 
-function makeButton(label, action, className = '') {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = className;
-  button.textContent = label;
-  button.onclick = async () => {
-    button.disabled = true;
-    try { await action(); }
-    catch (error) { notice(error.message); }
-    finally { button.disabled = false; }
-  };
-  return button;
-}
-
-function showDialog(content) {
-  const dialog = byId('dialog');
-  dialog.innerHTML = content;
-  if (!dialog.open) dialog.showModal();
-  dialog.querySelector('[data-close]')?.addEventListener('click', () => dialog.close());
-}
-
 function renderFolders() {
-  const nav = byId('folders');
+  const nav = el('folders');
   nav.replaceChildren();
-  for (const folder of state.folders) {
-    const label = folder.displayName || 'Folder';
-    const button = makeButton(label, async () => {
-      state.folder = folder.id;
-      byId('scope').value = 'folder';
-      renderFolders();
-      await loadMail();
-    }, 'folder');
-    if (folder.id === state.folder) button.setAttribute('aria-current', 'true');
-    if (folder.unreadItemCount) {
-      const count = document.createElement('span');
-      count.className = 'count';
-      count.textContent = folder.unreadItemCount;
-      button.append(count);
+
+  function addFolders(target, folders, ancestors = new Set()) {
+    for (const folder of folders) {
+      if (ancestors.has(folder.id)) continue;
+      const row = document.createElement('div');
+      row.className = 'folder-line';
+      if (folder.childFolderCount) {
+        const expanded = state.expanded.has(folder.id);
+        const toggle = button(expanded ? '▾' : '▸', async () => {
+          if (!state.expanded.delete(folder.id)) {
+            if (!state.children.has(folder.id)) {
+              const result = await api('/api/folders?' + new URLSearchParams({parent:folder.id}));
+              state.children.set(folder.id, result.folders || []);
+            }
+            state.expanded.add(folder.id);
+          }
+          renderFolders();
+        }, 'toggle');
+        toggle.setAttribute('aria-label', `${expanded ? 'Collapse' : 'Expand'} ${folder.displayName}`);
+        toggle.setAttribute('aria-expanded', String(expanded));
+        row.append(toggle);
+      }
+
+      const control = button(folder.displayName || 'Folder', async () => {
+        state.folder = folder.id;
+        el('search').value = '';
+        el('scope').value = 'folder';
+        el('filter').value = 'all';
+        renderFolders();
+        await loadMail();
+      }, 'folder');
+      if (folder.id === state.folder) control.setAttribute('aria-current', 'true');
+      if (folder.unreadItemCount) {
+        const count = document.createElement('span');
+        count.className = 'count';
+        count.textContent = folder.unreadItemCount;
+        control.append(count);
+      }
+      row.append(control);
+      target.append(row);
+      if (state.expanded.has(folder.id)) {
+        const children = document.createElement('div');
+        children.className = 'children';
+        addFolders(children, state.children.get(folder.id) || [], new Set([...ancestors, folder.id]));
+        target.append(children);
+      }
     }
-    nav.append(button);
   }
+
+  addFolders(nav, state.roots);
 }
 
 async function loadFolders() {
+  const version = ++state.folderVersion;
   try {
     const result = await api('/api/folders');
-    state.folders = result.folders || [];
-    if (state.folder === 'inbox') {
-      const inbox = state.folders.find(folder => /^inbox$/i.test(folder.displayName));
-      if (inbox) state.folder = inbox.id;
+    if (version !== state.folderVersion) return;
+    state.roots = result.folders || [];
+    const inbox = state.roots.find(folder => /^inbox$/i.test(folder.displayName));
+    if (inbox) {
+      if (state.folder === 'inbox') state.folder = inbox.id;
+      state.roots.sort((a, b) => Number(b === inbox) - Number(a === inbox));
     }
     renderFolders();
-  } catch (error) { notice(error.message); }
+
+    const expanded = [...state.expanded];
+    await Promise.all(expanded.map(async id => {
+      try {
+        const child = await api('/api/folders?' + new URLSearchParams({parent:id}));
+        if (version === state.folderVersion && state.expanded.has(id)) {
+          state.children.set(id, child.folders || []);
+        }
+      } catch (error) {
+        if (version === state.folderVersion) notice(error.message);
+      }
+    }));
+    if (expanded.length && version === state.folderVersion) renderFolders();
+  } catch (error) {
+    if (version === state.folderVersion) notice(error.message);
+  }
 }
 
 function closeReader() {
-  state.readerRequest++;
-  state.openId = null;
-  byId('panes').classList.remove('reading');
-  byId('reader').innerHTML = '<p class="placeholder muted">Select a message to read it</p>';
-  byId('rows').querySelector('.current')?.classList.remove('current');
+  state.readerVersion++;
+  state.open = null;
+  el('panes').classList.remove('reading');
+  el('reader').innerHTML = '<p class="muted">Select a message to read it.</p>';
+  el('rows').querySelector('.current')?.classList.remove('current');
+}
+
+function updateSelection() {
+  const size = state.selected.size;
+  el('selectAll').checked = size > 0 && size === state.mail.length;
+  el('selectAll').indeterminate = size > 0 && !el('selectAll').checked;
+  for (const id of ['readAll','unreadAll','archive','move','remove']) el(id).disabled = !size;
 }
 
 async function loadMail(append = false) {
   if (append && !state.cursor) return;
-  const serial = ++state.listRequest;
-  const rows = byId('rows');
-  const more = byId('more');
+  const version = ++state.listVersion;
+  const rows = el('rows');
+  const more = el('more');
   const query = append ? new URLSearchParams(state.query) : new URLSearchParams();
-
   if (append) {
     query.set('cursor', state.cursor);
   } else {
-    const search = byId('search').value.trim();
-    const allFolders = search && byId('scope').value === 'all';
-    const current = state.folders.find(folder => folder.id === state.folder);
-    query.set('folder', allFolders ? 'all' : state.folder);
+    const search = el('search').value.trim();
+    const wholeMailbox = search && el('scope').value === 'all';
+    const folder = allFolders().find(item => item.id === state.folder);
+    query.set('folder', wholeMailbox ? 'all' : state.folder);
     if (search) query.set('search', search);
-    else if (byId('filter').value === 'unread') query.set('unread', '1');
-
-    byId('filter').disabled = Boolean(search);
-    byId('listTitle').textContent = search
-      ? (allFolders ? 'All folders · Search results' : 'Search results')
-      : current?.displayName || 'Inbox';
+    else if (el('filter').value === 'unread') query.set('unread', '1');
+    el('filter').disabled = Boolean(search);
+    el('folderName').textContent = search
+      ? (wholeMailbox ? 'All folders · Search results' : 'Search results')
+      : folder?.displayName || 'Inbox';
     state.query = query.toString();
     state.cursor = null;
-    state.messages = [];
+    state.mail = [];
     state.selected.clear();
     updateSelection();
     closeReader();
@@ -339,21 +344,23 @@ async function loadMail(append = false) {
   more.disabled = true;
   try {
     const result = await api('/api/messages?' + query);
-    if (serial !== state.listRequest) return;
-    const seen = new Set(state.messages.map(message => message.id));
-    for (const message of result.messages || []) {
-      if (seen.has(message.id)) continue;
-      state.messages.push(message);
-      seen.add(message.id);
+    if (version !== state.listVersion) return;
+    const seen = new Set(state.mail.map(item => item.id));
+    for (const item of result.messages || []) {
+      if (!seen.has(item.id)) {
+        state.mail.push(item);
+        seen.add(item.id);
+      }
     }
     state.cursor = result.cursor;
-    renderMessages();
+    renderMail();
+    if (result.warning) notice(result.warning);
   } catch (error) {
-    if (serial !== state.listRequest) return;
+    if (version !== state.listVersion) return;
     if (append) notice(error.message);
-    else rows.innerHTML = '<p role="alert">' + escapeHtml(error.message) + '</p>';
+    else rows.innerHTML = `<p role="alert">${escapeHtml(error.message)}</p>`;
   } finally {
-    if (serial === state.listRequest) {
+    if (version === state.listVersion) {
       rows.setAttribute('aria-busy', 'false');
       more.hidden = !state.cursor;
       more.disabled = false;
@@ -361,159 +368,133 @@ async function loadMail(append = false) {
   }
 }
 
-function updateSelection() {
-  const selectAll = byId('selectAll');
-  const count = state.selected.size;
-  selectAll.checked = count > 0 && count === state.messages.length;
-  selectAll.indeterminate = count > 0 && !selectAll.checked;
-  for (const id of ['markRead', 'markUnread', 'archive', 'move', 'delete']) {
-    byId(id).disabled = count === 0;
-  }
-}
-
-function renderMessages() {
-  const rows = byId('rows');
-  const current = state.folders.find(folder => folder.id === state.folder);
-  const allFolders = new URLSearchParams(state.query).get('folder') === 'all';
-  const outgoing = !allFolders && /^(sent items|drafts|outbox)$/i.test(current?.displayName || '');
+function renderMail() {
+  const rows = el('rows');
+  const folder = allFolders().find(item => item.id === state.folder);
+  const mailboxSearch = new URLSearchParams(state.query).get('folder') === 'all';
+  const sent = !mailboxSearch && /^(sent items|outbox|drafts)$/i.test(folder?.displayName || '');
   rows.replaceChildren();
 
-  for (const message of state.messages) {
-    const article = document.createElement('article');
-    article.className = 'message' + (message.isRead ? '' : ' unread')
-      + (state.openId === message.id ? ' current' : '');
-    article.dataset.id = message.id;
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = state.selected.has(message.id);
-    checkbox.setAttribute('aria-label', 'Select ' + (message.subject || 'message'));
-    checkbox.onchange = () => {
-      if (checkbox.checked) state.selected.add(message.id);
-      else state.selected.delete(message.id);
+  for (const item of state.mail) {
+    const row = document.createElement('article');
+    row.className = 'mail' + (item.isRead ? '' : ' unread') + (item.id === state.open ? ' current' : '');
+    row.dataset.message = item.id;
+    const selected = document.createElement('input');
+    selected.type = 'checkbox';
+    selected.setAttribute('aria-label', 'Select ' + (item.subject || 'message'));
+    selected.checked = state.selected.has(item.id);
+    selected.onchange = () => {
+      if (selected.checked) state.selected.add(item.id);
+      else state.selected.delete(item.id);
       updateSelection();
     };
-
-    const address = addressOf(outgoing ? message.toRecipients?.[0] : message.from);
-    const subject = escapeHtml(message.subject || '(no subject)');
+    const person = byAddress(sent ? item.toRecipients?.[0] : item.from);
     const open = document.createElement('button');
     open.type = 'button';
-    open.innerHTML = `<span class="envelope">
-        <strong>${escapeHtml(address.name || address.address || 'Unknown')}</strong>
-        <time>${escapeHtml(dateLabel((outgoing && message.sentDateTime) || message.receivedDateTime, true))}</time>
-      </span>
-      <span class="subject">${message.hasAttachments ? '📎 ' : ''}${message.flag?.flagStatus === 'flagged' ? '⚑ ' : ''}${subject}</span>
-      <span class="muted">${escapeHtml(message.bodyPreview)}</span>`;
-    open.onclick = () => openMessage(message.id);
-    article.append(checkbox, open);
-    rows.append(article);
+    open.innerHTML = `<span class="from"><strong>${escapeHtml(person.name || person.address || 'Unknown')}</strong>
+      <time>${escapeHtml(dateLabel((sent && item.sentDateTime) || item.receivedDateTime, true))}</time></span>
+      <span class="subject">${item.hasAttachments ? '📎 ' : ''}${item.flag?.flagStatus === 'flagged' ? '⚑ ' : ''}${escapeHtml(item.subject || '(no subject)')}</span>
+      <span class="muted">${escapeHtml(item.bodyPreview)}</span>`;
+    open.onclick = () => openMessage(item.id);
+    row.append(selected, open);
+    rows.append(row);
   }
-  if (!state.messages.length) rows.innerHTML = '<p class="muted">No messages found.</p>';
+  if (!state.mail.length) rows.innerHTML = '<p class="muted">No messages found.</p>';
   updateSelection();
 }
 
 async function openMessage(id) {
-  const serial = ++state.readerRequest;
-  state.openId = id;
-  for (const row of byId('rows').querySelectorAll('.message')) {
-    row.classList.toggle('current', row.dataset.id === id);
+  const version = ++state.readerVersion;
+  state.open = id;
+  for (const row of el('rows').querySelectorAll('.mail')) {
+    row.classList.toggle('current', row.dataset.message === id);
   }
-  byId('panes').classList.add('reading');
-  const reader = byId('reader');
-  const back = makeButton('Back to messages', closeReader, 'back');
+  el('panes').classList.add('reading');
+  const reader = el('reader');
+  const back = button('Back to messages', closeReader, 'back');
   const status = document.createElement('p');
   status.textContent = 'Loading message…';
   reader.replaceChildren(back, status);
 
   try {
-    const message = await api(messageUrl(id));
-    if (serial !== state.readerRequest) return;
-    const from = addressOf(message.from);
-    const to = (message.toRecipients || []).map(item => addressOf(item).address).filter(Boolean);
-    const heading = document.createElement('div');
-    heading.innerHTML = `<h2>${escapeHtml(message.subject || '(no subject)')}</h2>
-      <p class="muted"><b>From</b> ${escapeHtml(from.address || from.name)}
-      <br><b>To</b> ${escapeHtml(to.join(', '))}
-      <br>${escapeHtml(dateLabel(message.receivedDateTime || message.sentDateTime))}</p>`;
+    const item = await api(messageUrl(id));
+    if (version !== state.readerVersion) return;
+    const from = byAddress(item.from);
+    const to = (item.toRecipients || []).map(entry => byAddress(entry).address).filter(Boolean);
+    const header = document.createElement('div');
+    header.innerHTML = `<h2>${escapeHtml(item.subject || '(no subject)')}</h2>
+      <p class="muted"><b>From</b> ${escapeHtml(from.address || from.name)}<br>
+      <b>To</b> ${escapeHtml(to.join(', '))}<br>
+      ${escapeHtml(dateLabel(item.receivedDateTime || item.sentDateTime))}</p>`;
 
     const actions = document.createElement('div');
     actions.className = 'actions';
-    if (message.isDraft) {
-      actions.append(makeButton('Edit draft', () => compose('draft', message), 'primary'));
+    if (item.isDraft) {
+      actions.append(button('Edit draft', () => compose('draft', item), 'primary'));
     } else {
       actions.append(
-        makeButton('Reply', () => compose('reply', message), 'primary'),
-        makeButton('Reply all', () => compose('replyAll', message)),
-        makeButton('Forward', () => compose('forward', message)),
+        button('Reply', () => compose('reply', item), 'primary'),
+        button('Reply all', () => compose('replyAll', item)),
+        button('Forward', () => compose('forward', item)),
       );
     }
-    const flagged = message.flag?.flagStatus === 'flagged';
+    const flagged = item.flag?.flagStatus === 'flagged';
     actions.append(
-      makeButton(message.isRead ? 'Mark unread' : 'Mark read', async () => {
-        const isRead = !message.isRead;
-        await api(messageUrl(id) + '/read', 'POST', { isRead });
-        const item = state.messages.find(entry => entry.id === id);
-        if (item) item.isRead = isRead;
-        if (byId('filter').value === 'unread' && !byId('filter').disabled && isRead) {
+      button(item.isRead ? 'Mark unread' : 'Mark read', async () => {
+        const isRead = !item.isRead;
+        await api(messageUrl(id) + '/read', 'POST', {isRead});
+        const cached = state.mail.find(entry => entry.id === id);
+        if (cached) cached.isRead = isRead;
+        if (el('filter').value === 'unread' && !el('filter').disabled && isRead) {
           await loadMail();
         } else {
-          renderMessages();
-          if (serial === state.readerRequest) await openMessage(id);
+          renderMail();
+          if (state.readerVersion === version) await openMessage(id);
         }
         await loadFolders();
       }),
-      makeButton(flagged ? 'Clear flag' : 'Flag', async () => {
-        const flag = { flagStatus: flagged ? 'notFlagged' : 'flagged' };
-        await graph('PATCH', graphMessage(id), { flag });
-        const item = state.messages.find(entry => entry.id === id);
-        if (item) item.flag = flag;
-        renderMessages();
-        if (serial === state.readerRequest) await openMessage(id);
+      button(flagged ? 'Clear flag' : 'Flag', async () => {
+        const flag = {flagStatus: flagged ? 'notFlagged' : 'flagged'};
+        await graph('PATCH', graphUrl(id), {flag});
+        const cached = state.mail.find(entry => entry.id === id);
+        if (cached) cached.flag = flag;
+        renderMail();
+        if (state.readerVersion === version) await openMessage(id);
       }),
-      makeButton('Delete', async () => {
-        if (confirm('Delete this message?')) {
-          await api(messageUrl(id), 'DELETE');
-          await refresh();
-        }
+      button('Delete', async () => {
+        if (!confirm('Delete this message?')) return;
+        await api(messageUrl(id), 'DELETE');
+        await refresh();
       }, 'danger'),
     );
 
-    const attachments = document.createElement('div');
-    attachments.className = 'actions';
+    const files = document.createElement('div');
+    files.className = 'actions';
     const body = document.createElement('div');
     body.className = 'message-body';
-    body.innerHTML = message.safeHtml || escapeHtml(message.bodyPreview);
-    reader.replaceChildren(back, heading, actions, attachments);
-    if (message.imageNotice) {
-      const hint = document.createElement('p');
-      hint.className = 'muted';
-      hint.textContent = message.imageNotice;
-      reader.append(hint);
-    }
-    reader.append(body);
+    body.innerHTML = item.safeHtml || escapeHtml(item.bodyPreview);
+    reader.replaceChildren(back, header, actions, files, body);
 
-    if (message.hasAttachments) await loadAttachments(id, attachments);
+    if (item.hasAttachments) await showFiles(id, files);
   } catch (error) {
-    if (serial === state.readerRequest) status.textContent = error.message;
+    if (version === state.readerVersion) status.textContent = error.message;
   }
 }
 
-async function loadAttachments(id, container) {
+async function showFiles(id, container) {
   try {
-    const result = await graph('GET', graphMessage(id) + '/attachments', undefined, {
-      '$select': 'id,name,isInline,contentType,size',
-    });
-    for (const attachment of result.value || []) {
-      if (attachment.isInline) continue;
-      const name = attachment.name || 'Attachment';
-      container.append(makeButton('Download ' + name, async () => {
-        const path = graphMessage(id) + '/attachments/' + encodeURIComponent(attachment.id) + '/$value';
-        const response = await request('/api/download', 'POST', { path, name });
+    const result = await api(messageUrl(id) + '/attachments');
+    for (const file of result.attachments || []) {
+      if (file.isInline) continue;
+      const name = file.name || 'Attachment';
+      container.append(button('Download ' + name, async () => {
+        const path = graphUrl(id) + '/attachments/' + encodeURIComponent(file.id) + '/$value';
+        const response = await request('/api/download', 'POST', {path, name});
         const url = URL.createObjectURL(await response.blob());
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = name;
-        anchor.click();
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name;
+        link.click();
         setTimeout(() => URL.revokeObjectURL(url), 30000);
       }));
     }
@@ -527,93 +508,100 @@ async function refresh() {
 }
 
 async function bulk(ids, operation, label) {
-  let count = 0;
+  if (!ids.length) return;
+  let done = 0;
   try {
     for (const id of ids) {
       await operation(id);
-      count++;
+      done++;
     }
-    notice(`${label} ${count} message(s).`);
+    notice(`${label} ${done} message(s).`);
   } catch (error) {
-    notice(`${label} ${count} of ${ids.length} message(s). ${error.message}`);
+    notice(`${label} ${done} of ${ids.length} message(s). ${error.message}`);
   } finally {
     await refresh();
   }
 }
 
 function markSelected(isRead) {
-  return bulk([...state.selected], id => api(messageUrl(id) + '/read', 'POST', { isRead }),
+  return bulk([...state.selected], id => api(messageUrl(id) + '/read', 'POST', {isRead}),
     isRead ? 'Marked read' : 'Marked unread');
 }
 
 function moveSelected() {
   const ids = [...state.selected];
   if (!ids.length) return;
-  showDialog(`<h2 id="dialogTitle">Move ${ids.length} message(s)</h2>
-    <label>Destination<select id="destination"></select></label>
-    <div class="actions"><button data-close>Cancel</button><button class="primary" id="confirmMove">Move</button></div>`);
-  for (const folder of state.folders) {
-    byId('destination').add(new Option(folder.displayName, folder.id));
-  }
-  byId('confirmMove').onclick = () => {
-    const destinationId = byId('destination').value;
-    if (!destinationId) return;
-    byId('dialog').close();
-    bulk(ids, id => api(messageUrl(id) + '/move', 'POST', { destinationId }), 'Moved');
+  dialog('Move messages', `<label>Destination<select id="destination"></select></label>
+    <div class="actions"><button data-close>Cancel</button><button id="confirmMove" class="primary">Move</button></div>`);
+  for (const folder of allFolders()) el('destination').add(new Option(folder.displayName, folder.id));
+  el('confirmMove').onclick = () => {
+    const destinationId = el('destination').value;
+    if (!destinationId) return notice('Choose a destination folder.');
+    el('dialog').close();
+    bulk(ids, id => api(messageUrl(id) + '/move', 'POST', {destinationId}), 'Moved');
   };
 }
 
-function compose(mode = 'new', message) {
-  const title = { new: 'New mail', draft: 'Edit draft', reply: 'Reply', replyAll: 'Reply all', forward: 'Forward' }[mode];
+function recipients(raw) {
+  return raw.split(/[,;]/).map(address => address.trim()).filter(Boolean)
+    .map(address => ({emailAddress:{address}}));
+}
+
+function compose(mode = 'new', item) {
+  const title = {new:'New mail',draft:'Edit draft',reply:'Reply',replyAll:'Reply all',forward:'Forward'}[mode];
   const editable = mode === 'new' || mode === 'draft';
-  const needsAddress = editable || mode === 'forward';
-  showDialog(`<h2 id="dialogTitle">${title}</h2>
-    ${needsAddress ? '<label>To<input id="to" placeholder="Separate addresses with commas"></label>' : ''}
+  const addressed = editable || mode === 'forward';
+  dialog(title, `
+    ${addressed ? '<label>To<input id="to" placeholder="Separate addresses with commas"></label>' : ''}
     ${editable ? '<label>Cc<input id="cc"></label><label>Bcc<input id="bcc"></label><label>Subject<input id="subject"></label>' :
-      '<p class="muted">' + escapeHtml(message.subject || '(no subject)') + '</p>'}
-    <label>Message<textarea id="content"></textarea></label>
+      `<p class="muted">${escapeHtml(item.subject || '(no subject)')}</p>`}
+    <label>Message<textarea id="body"></textarea></label>
     <div class="actions"><button data-close>Cancel</button>
-      ${editable ? '<button id="saveDraft">Save draft</button>' : ''}
-      <button id="send" class="primary">Send</button>
-    </div>`);
+    ${editable ? '<button id="saveDraft">Save draft</button>' : ''}
+    <button class="primary" id="send">Send</button></div>`);
 
   if (mode === 'draft') {
-    for (const [field, key] of [['to', 'toRecipients'], ['cc', 'ccRecipients'], ['bcc', 'bccRecipients']]) {
-      byId(field).value = (message[key] || []).map(item => addressOf(item).address).filter(Boolean).join(', ');
+    for (const [field, key] of [['to','toRecipients'],['cc','ccRecipients'],['bcc','bccRecipients']]) {
+      el(field).value = (item[key] || []).map(entry => byAddress(entry).address).filter(Boolean).join(', ');
     }
-    byId('subject').value = message.subject || '';
-    byId('content').value = message.body?.content || '';
+    el('subject').value = item.subject || '';
+    if ((item.body?.contentType || '').toLowerCase() === 'html') {
+      const plain = new DOMParser().parseFromString(item.safeHtml || '', 'text/html');
+      el('body').value = plain.body.textContent;
+    } else {
+      el('body').value = item.body?.content || '';
+    }
   }
 
-  const content = () => ({
-    subject: byId('subject')?.value || '',
-    body: byId('content').value,
-    to: byId('to')?.value || '',
-    cc: byId('cc')?.value || '',
-    bcc: byId('bcc')?.value || '',
-  });
+  const send = el('send');
+  const save = el('saveDraft');
+  const draftPath = mode === 'draft' ? graphUrl(item.id) : '/me/messages';
 
-  function draftPayload(values) {
+  function fields() {
     return {
-      subject: values.subject,
-      body: { contentType: 'HTML', content: values.body },
-      toRecipients: recipients(values.to),
-      ccRecipients: recipients(values.cc),
-      bccRecipients: recipients(values.bcc),
+      to:el('to')?.value || '', cc:el('cc')?.value || '', bcc:el('bcc')?.value || '',
+      subject:el('subject')?.value || '', body:el('body').value,
     };
   }
 
-  const dialog = byId('dialog');
-  const send = byId('send');
-  const save = byId('saveDraft');
+  async function saveDraft(values) {
+    return graph(mode === 'draft' ? 'PATCH' : 'POST', draftPath, {
+      subject: values.subject,
+      body: {contentType:'Text', content:values.body},
+      toRecipients: recipients(values.to),
+      ccRecipients: recipients(values.cc),
+      bccRecipients: recipients(values.bcc),
+    });
+  }
 
-  async function submit(action, success) {
+  async function submit(action, message) {
     send.disabled = true;
     if (save) save.disabled = true;
+    el('dialogError').textContent = '';
     try {
-      await action(content());
-      if (send.isConnected) dialog.close();
-      notice(success);
+      await action(fields());
+      if (send.isConnected) el('dialog').close();
+      notice(message);
       await refresh();
     } catch (error) {
       notice(error.message);
@@ -623,83 +611,78 @@ function compose(mode = 'new', message) {
     }
   }
 
-  if (save) save.onclick = () => submit(values => mode === 'draft'
-    ? graph('PATCH', graphMessage(message.id), draftPayload(values))
-    : graph('POST', '/me/messages', draftPayload(values)), 'Draft saved.');
-
+  if (save) save.onclick = () => submit(saveDraft, 'Draft saved.');
   send.onclick = () => submit(async values => {
-    if (needsAddress && !recipients(values.to).length) throw new Error('Enter at least one recipient.');
+    if (addressed && !recipients(values.to).length) throw new Error('Enter at least one recipient.');
     if (mode === 'new') {
       await api('/api/send', 'POST', values);
     } else if (mode === 'draft') {
-      await graph('PATCH', graphMessage(message.id), draftPayload(values));
-      await graph('POST', graphMessage(message.id) + '/send');
+      await saveDraft(values);
+      await graph('POST', draftPath + '/send');
     } else {
-      const payload = { comment: values.body };
+      const payload = {comment:values.body};
       if (mode === 'forward') payload.toRecipients = recipients(values.to);
-      await graph('POST', graphMessage(message.id) + '/' + mode, payload);
+      await graph('POST', graphUrl(item.id) + '/' + mode, payload);
     }
   }, 'Sent.');
 }
 
 async function showRules() {
   const result = await api('/api/rules');
-  showDialog(`<h2 id="dialogTitle">Inbox rules</h2><div id="ruleRows"></div>
-    <div class="actions"><button data-close>Close</button><button id="newRule" class="primary">New rule</button></div>`);
-  byId('newRule').onclick = () => editRule();
-  const rows = byId('ruleRows');
+  dialog('Inbox rules', `<div id="ruleRows"></div>
+    <div class="actions"><button data-close>Close</button><button class="primary" id="newRule">New rule</button></div>`);
+  el('newRule').onclick = () => editRule();
+  const rows = el('ruleRows');
   for (const rule of result.rules || []) {
     const row = document.createElement('div');
     row.className = 'rule';
-    const title = document.createElement('strong');
-    title.textContent = rule.displayName + (rule.isEnabled === false ? ' (disabled)' : '');
+    const label = document.createElement('strong');
+    label.textContent = rule.displayName + (rule.isEnabled === false ? ' (disabled)' : '');
     const actions = document.createElement('div');
     actions.className = 'actions';
     actions.append(
-      makeButton('Edit', () => editRule(rule)),
-      makeButton('Delete', async () => {
+      button('Edit', () => editRule(rule)),
+      button('Delete', async () => {
         if (!confirm('Delete this inbox rule?')) return;
         await api('/api/rules/' + encodeURIComponent(rule.id), 'DELETE');
         await showRules();
       }, 'danger'),
     );
-    row.append(title, actions);
+    row.append(label, actions);
     rows.append(row);
   }
   if (!rows.children.length) rows.textContent = 'No inbox rules.';
 }
 
 function editRule(rule) {
-  showDialog(`<h2 id="dialogTitle">${rule ? 'Edit rule' : 'New rule'}</h2>
+  dialog(rule ? 'Edit rule' : 'New rule', `
     <label>Rule name<input id="ruleName"></label>
-    <label>Sender contains<input id="ruleSender"></label>
+    <label>Sender contains<input id="ruleFrom"></label>
     <label>Subject contains<input id="ruleSubject"></label>
     <label>Move to folder<select id="ruleFolder"><option value="">None</option></select></label>
     <label><input type="checkbox" id="ruleDelete"> Delete the message</label>
     <label><input type="checkbox" id="ruleRead"> Mark as read</label>
-    <div class="actions"><button data-close>Cancel</button><button class="primary" id="saveRule">Save rule</button></div>`);
-  for (const folder of state.folders) {
-    byId('ruleFolder').add(new Option(folder.displayName, folder.id));
+    <div class="actions"><button data-close>Cancel</button><button id="saveRule" class="primary">Save rule</button></div>`);
+  for (const folder of allFolders()) el('ruleFolder').add(new Option(folder.displayName, folder.id));
+  const existingDestination = rule?.actions?.moveToFolder || '';
+  if (existingDestination && ![...el('ruleFolder').options].some(option => option.value === existingDestination)) {
+    el('ruleFolder').add(new Option('Current destination', existingDestination));
   }
-  byId('ruleName').value = rule?.displayName || '';
-  byId('ruleSender').value = (rule?.conditions?.senderContains || []).join(', ');
-  byId('ruleSubject').value = (rule?.conditions?.subjectContains || []).join(', ');
-  byId('ruleFolder').value = rule?.actions?.moveToFolder || '';
-  byId('ruleDelete').checked = Boolean(rule?.actions?.delete);
-  byId('ruleRead').checked = Boolean(rule?.actions?.markAsRead);
-
-  const save = byId('saveRule');
+  el('ruleName').value = rule?.displayName || '';
+  el('ruleFrom').value = (rule?.conditions?.senderContains || []).join(', ');
+  el('ruleSubject').value = (rule?.conditions?.subjectContains || []).join(', ');
+  el('ruleFolder').value = existingDestination;
+  el('ruleDelete').checked = Boolean(rule?.actions?.delete);
+  el('ruleRead').checked = Boolean(rule?.actions?.markAsRead);
+  const save = el('saveRule');
   save.onclick = async () => {
     save.disabled = true;
-    const data = {
-      displayName: byId('ruleName').value,
-      fromContains: byId('ruleSender').value,
-      subjectContains: byId('ruleSubject').value,
-      moveTo: byId('ruleFolder').value,
-      delete: byId('ruleDelete').checked,
-      markRead: byId('ruleRead').checked,
-    };
     try {
+      const data = {
+        displayName:el('ruleName').value, fromContains:el('ruleFrom').value,
+        subjectContains:el('ruleSubject').value, moveTo:el('ruleFolder').value,
+        delete:el('ruleDelete').checked, markRead:el('ruleRead').checked,
+      };
       if (rule) await api('/api/rules/' + encodeURIComponent(rule.id), 'PATCH', data);
       else await api('/api/rules', 'POST', data);
       await showRules();
@@ -711,46 +694,41 @@ function editRule(rule) {
   };
 }
 
-byId('searchForm').onsubmit = event => { event.preventDefault(); loadMail(); };
-byId('clearSearch').onclick = () => { byId('search').value = ''; loadMail(); };
-byId('refresh').onclick = refresh;
-byId('filter').onchange = () => loadMail();
-byId('more').onclick = () => loadMail(true);
-byId('newMail').onclick = () => compose();
-byId('markRead').onclick = () => markSelected(true);
-byId('markUnread').onclick = () => markSelected(false);
-byId('move').onclick = moveSelected;
-byId('archive').onclick = () => bulk([...state.selected],
-  id => api(messageUrl(id) + '/move', 'POST', { destinationId: 'archive' }), 'Archived');
-byId('delete').onclick = () => {
+el('searchForm').onsubmit = event => { event.preventDefault(); loadMail(); };
+el('clearSearch').onclick = () => { el('search').value = ''; loadMail(); };
+el('filter').onchange = () => loadMail();
+el('more').onclick = () => loadMail(true);
+el('refresh').onclick = refresh;
+el('newMail').onclick = () => compose();
+el('readAll').onclick = () => markSelected(true);
+el('unreadAll').onclick = () => markSelected(false);
+el('move').onclick = moveSelected;
+el('archive').onclick = () => bulk([...state.selected],
+  id => api(messageUrl(id) + '/move', 'POST', {destinationId:'archive'}), 'Archived');
+el('remove').onclick = () => {
   const ids = [...state.selected];
   if (ids.length && confirm(`Delete ${ids.length} selected message(s)?`)) {
     bulk(ids, id => api(messageUrl(id), 'DELETE'), 'Deleted');
   }
 };
-byId('selectAll').onchange = event => {
-  state.selected = new Set(event.target.checked ? state.messages.map(message => message.id) : []);
-  renderMessages();
+el('selectAll').onchange = event => {
+  state.selected = new Set(event.target.checked ? state.mail.map(item => item.id) : []);
+  renderMail();
 };
-byId('rules').onclick = () => showRules().catch(error => notice(error.message));
-byId('logout').onclick = async () => {
-  try {
-    await api('/api/logout', 'POST');
-    location.reload();
-  } catch (error) { notice(error.message); }
+el('rules').onclick = () => showRules().catch(error => notice(error.message));
+el('logout').onclick = async () => {
+  try { await api('/api/logout', 'POST'); location.replace('/'); }
+  catch (error) { notice(error.message); }
 };
 
 async function start() {
   closeReader();
   updateSelection();
-  try {
-    const session = await api('/api/session');
-    byId('account').textContent = session.who || '';
-  } catch (error) { notice(error.message); }
+  api('/api/session').then(data => { el('account').textContent = data.who || ''; })
+    .catch(error => notice(error.message));
   await loadFolders();
   await loadMail();
 }
-
 start();
 </script>
 </body>
