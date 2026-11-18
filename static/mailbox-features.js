@@ -476,18 +476,23 @@
     ['stopProcessingRules','Stop processing more rules','check'],
   ];
 
+  function settingsNavigation(inRules = false) {
+    const nav = element('nav', '', 'rules-nav');
+    nav.setAttribute('aria-label', 'Mail settings');
+    if (inRules) nav.append(action('Settings overview', settingsHub));
+    const rules = action('Inbox rules', advancedRules);
+    if (inRules) rules.setAttribute('aria-current', 'page');
+    nav.append(rules, action('Mailbox settings', settings), action('Manage folders', folderTools),
+      action('Search history', historyPanel));
+    return nav;
+  }
+
   function rulesPanel(title) {
     const main = panel(title);
     modal.classList.add('feature-wide');
     const layout = element('div', '', 'rules-layout');
-    const nav = element('nav', '', 'rules-nav');
-    nav.setAttribute('aria-label', 'Mail settings');
-    const selected = action('Inbox rules', advancedRules);
-    selected.setAttribute('aria-current', 'page');
-    nav.append(selected, action('Mailbox settings', settings), action('Manage folders', folderTools),
-      action('Search history', historyPanel));
     const content = element('div', '', 'rules-content');
-    layout.append(nav, content);
+    layout.append(settingsNavigation(true), content);
     main.append(layout);
     return content;
   }
@@ -1160,11 +1165,7 @@
 
   async function settingsHub() {
     const main = panel('Settings');
-    const navigation = element('nav', '', 'feature-apps');
-    navigation.setAttribute('aria-label', 'Settings sections');
-    navigation.append(action('Inbox rules', advancedRules), action('Mailbox settings', settings),
-      action('Manage folders', folderTools), action('Search history', historyPanel));
-    main.append(navigation);
+    main.append(settingsNavigation());
     const connection = await send('/api/session');
     if (connection.oauth && main.isConnected) {
       const grant = element('a', 'Connect People, Calendar, and Tasks with Microsoft');
@@ -1189,9 +1190,5 @@
     apps.append(mail, action('People', mailCorrespondents), action('Calendar', () => records('calendar')),
       action('Tasks', tasks), action('Settings', settingsHub));
     header.insertBefore(apps, header.querySelector('#who, #account'));
-    const existingRules = [...header.querySelectorAll('button')].find(control => control.textContent.trim() === 'Inbox rules');
-    if (existingRules) {
-      existingRules.onclick = action('Inbox rules', advancedRules).onclick;
-    }
   }
 })();

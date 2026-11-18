@@ -64,7 +64,6 @@ dialog label{display:block;margin:9px 0}
 dialog input:not([type=checkbox]),dialog select,dialog textarea{display:block;width:100%;margin-top:4px}
 dialog textarea{min-height:145px;resize:vertical}
 dialog .actions{margin-top:12px}
-.rule{padding:8px 0;border-bottom:1px solid var(--line)}
 #notice{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:5;max-width:90vw;padding:10px 14px;border-radius:8px;background:#112b41;color:white}
 #dialogError{color:#a1293b;margin:10px 0 0}
 @media(max-width:760px){
@@ -85,7 +84,6 @@ dialog .actions{margin-top:12px}
 <header class="top">
   <h1>Mail Console</h1>
   <span id="account"></span>
-  <button id="rules">Inbox rules</button>
   <button id="logout">Sign out</button>
 </header>
 
@@ -627,73 +625,6 @@ function compose(mode = 'new', item) {
   }, 'Sent.');
 }
 
-async function showRules() {
-  const result = await api('/api/rules');
-  dialog('Inbox rules', `<div id="ruleRows"></div>
-    <div class="actions"><button data-close>Close</button><button class="primary" id="newRule">New rule</button></div>`);
-  el('newRule').onclick = () => editRule();
-  const rows = el('ruleRows');
-  for (const rule of result.rules || []) {
-    const row = document.createElement('div');
-    row.className = 'rule';
-    const label = document.createElement('strong');
-    label.textContent = rule.displayName + (rule.isEnabled === false ? ' (disabled)' : '');
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    actions.append(
-      button('Edit', () => editRule(rule)),
-      button('Delete', async () => {
-        if (!confirm('Delete this inbox rule?')) return;
-        await api('/api/rules/' + encodeURIComponent(rule.id), 'DELETE');
-        await showRules();
-      }, 'danger'),
-    );
-    row.append(label, actions);
-    rows.append(row);
-  }
-  if (!rows.children.length) rows.textContent = 'No inbox rules.';
-}
-
-function editRule(rule) {
-  dialog(rule ? 'Edit rule' : 'New rule', `
-    <label>Rule name<input id="ruleName"></label>
-    <label>Sender contains<input id="ruleFrom"></label>
-    <label>Subject contains<input id="ruleSubject"></label>
-    <label>Move to folder<select id="ruleFolder"><option value="">None</option></select></label>
-    <label><input type="checkbox" id="ruleDelete"> Delete the message</label>
-    <label><input type="checkbox" id="ruleRead"> Mark as read</label>
-    <div class="actions"><button data-close>Cancel</button><button id="saveRule" class="primary">Save rule</button></div>`);
-  for (const folder of allFolders()) el('ruleFolder').add(new Option(folder.displayName, folder.id));
-  const existingDestination = rule?.actions?.moveToFolder || '';
-  if (existingDestination && ![...el('ruleFolder').options].some(option => option.value === existingDestination)) {
-    el('ruleFolder').add(new Option('Current destination', existingDestination));
-  }
-  el('ruleName').value = rule?.displayName || '';
-  el('ruleFrom').value = (rule?.conditions?.senderContains || []).join(', ');
-  el('ruleSubject').value = (rule?.conditions?.subjectContains || []).join(', ');
-  el('ruleFolder').value = existingDestination;
-  el('ruleDelete').checked = Boolean(rule?.actions?.delete);
-  el('ruleRead').checked = Boolean(rule?.actions?.markAsRead);
-  const save = el('saveRule');
-  save.onclick = async () => {
-    save.disabled = true;
-    try {
-      const data = {
-        displayName:el('ruleName').value, fromContains:el('ruleFrom').value,
-        subjectContains:el('ruleSubject').value, moveTo:el('ruleFolder').value,
-        delete:el('ruleDelete').checked, markRead:el('ruleRead').checked,
-      };
-      if (rule) await api('/api/rules/' + encodeURIComponent(rule.id), 'PATCH', data);
-      else await api('/api/rules', 'POST', data);
-      await showRules();
-    } catch (error) {
-      notice(error.message);
-    } finally {
-      save.disabled = false;
-    }
-  };
-}
-
 el('searchForm').onsubmit = event => { event.preventDefault(); loadMail(); };
 el('clearSearch').onclick = () => { el('search').value = ''; loadMail(); };
 el('filter').onchange = () => loadMail();
@@ -715,7 +646,6 @@ el('selectAll').onchange = event => {
   state.selected = new Set(event.target.checked ? state.mail.map(item => item.id) : []);
   renderMail();
 };
-el('rules').onclick = () => showRules().catch(error => notice(error.message));
 el('logout').onclick = async () => {
   try { await api('/api/logout', 'POST'); location.replace('/'); }
   catch (error) { notice(error.message); }
