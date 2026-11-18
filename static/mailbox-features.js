@@ -55,6 +55,18 @@
     .mailbox-feature-dialog .rule-check{display:flex;align-items:center;justify-content:space-between;flex-direction:row}
     .rule-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid #dce5ec}
     .rule-row>div{flex:1}
+    .rules-layout{display:grid;grid-template-columns:minmax(140px,190px) minmax(0,1fr);gap:18px;margin-top:12px}
+    .rules-nav{display:grid;align-content:start;gap:6px;padding:10px;background:#eef3f6;border-radius:12px}
+    .rules-nav button{text-align:left;white-space:normal}
+    .rules-nav [aria-current]{background:#def1e9;border-color:#76ad9d}
+    .rules-content{min-width:0}
+    .rule-builder{display:block}
+    .rule-options{display:grid;gap:6px}
+    .rule-option{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px}
+    .rule-option button{margin-bottom:8px}
+    .rule-builder>select{max-width:360px}
+    .rule-footer{position:sticky;bottom:0;background:white;border-top:1px solid #dce5ec;padding:10px 0}
+    @media(max-width:700px){.rules-layout{grid-template-columns:1fr}.rules-nav{display:flex;flex-wrap:wrap}}
     @media(max-width:700px){.people-split,.rule-group{grid-template-columns:1fr}.people-list{max-height:35vh}.feature-apps{order:2}.people-tools select{max-width:100%}}
   `;
   document.head.append(style);
@@ -464,11 +476,39 @@
     ['stopProcessingRules','Stop processing more rules','check'],
   ];
 
-  function configurableFields(definitions, source, title, defaultStop = false) {
+  function rulesPanel(title) {
+    const main = panel(title);
+    modal.classList.add('feature-wide');
+    const layout = element('div', '', 'rules-layout');
+    const nav = element('nav', '', 'rules-nav');
+    nav.setAttribute('aria-label', 'Mail settings');
+    const selected = action('Inbox rules', advancedRules);
+    selected.setAttribute('aria-current', 'page');
+    nav.append(selected, action('Mailbox settings', settings), action('Manage folders', folderTools),
+      action('Search history', historyPanel));
+    const content = element('div', '', 'rules-content');
+    layout.append(nav, content);
+    main.append(layout);
+    return content;
+  }
+
+  function configurableFields(definitions, source, title, addLabel, defaultStop = false) {
     const section = element('fieldset');
-    section.className = 'rule-group';
+    section.className = 'rule-group rule-builder';
     section.append(element('legend', title));
+    const rows = element('div', '', 'rule-options');
+    const picker = element('select');
+    picker.setAttribute('aria-label', addLabel);
+    section.append(rows, picker);
     const controls = [];
+
+    function updatePicker() {
+      picker.replaceChildren(new Option(addLabel, ''));
+      for (const control of controls.filter(item => item.row.hidden)) {
+        picker.add(new Option(control.caption, control.key));
+      }
+      picker.hidden = picker.options.length === 1;
+    }
 
     for (const [key, caption, type] of definitions) {
       let input;
@@ -497,15 +537,45 @@
             : '';
         }
       }
-      const row = label(caption, input);
-      if (type === 'check') row.classList.add('rule-check');
-      section.append(row);
-      controls.push({key,type,input,original:input.value,checked:input.checked});
+      const row = element('div', '', 'rule-option');
+      const named = label(caption, input);
+      if (type === 'check') named.classList.add('rule-check');
+      const control = {key,caption,type,input,row,original:input.value,checked:input.checked,removed:false};
+      controls.push(control);
+      row.hidden = !(Array.isArray(value) ? value.length : value) && key !== 'stopProcessingRules';
+      row.append(named);
+      if (key !== 'stopProcessingRules') {
+        const remove = action('Remove', () => {
+          row.hidden = true;
+          control.removed = true;
+          if (input.type === 'checkbox') input.checked = false;
+          else input.value = '';
+          updatePicker();
+          picker.focus();
+        });
+        remove.setAttribute('aria-label', 'Remove ' + caption);
+        row.append(remove);
+      }
+      rows.append(row);
     }
+    updatePicker();
+    picker.onchange = () => {
+      const control = controls.find(item => item.key === picker.value);
+      if (!control) return;
+      control.row.hidden = false;
+      control.removed = false;
+      if (control.type === 'check') control.input.checked = true;
+      updatePicker();
+      control.input.focus();
+    };
 
     const read = () => {
       const result = Object.fromEntries(Object.entries(source || {}).filter(([key]) => !key.startsWith('@')));
-      for (const {key,type,input,original,checked} of controls) {
+      for (const {key,type,input,original,checked,removed} of controls) {
+        if (removed) {
+          delete result[key];
+          continue;
+        }
         if (source && input.value === original && input.checked === checked) continue;
         delete result[key];
         if (type === 'check') {
@@ -525,8 +595,7 @@
   }
 
   function editAdvancedRule(rule, nextPriority) {
-    const main = panel(rule ? 'Edit inbox rule' : 'Create inbox rule');
-    modal.classList.add('feature-wide');
+    const main = rulesPanel(rule ? 'Edit inbox rule' : 'Create inbox rule');
     const name = element('input');
     name.value = rule?.displayName || '';
     name.maxLength = 255;
@@ -537,9 +606,9 @@
     const enabled = element('input');
     enabled.type = 'checkbox';
     enabled.checked = rule?.isEnabled ?? true;
-    const conditions = configurableFields(predicateFields, rule?.conditions, 'Match these conditions');
-    const exceptions = configurableFields(predicateFields, rule?.exceptions, 'Except when');
-    const actions = configurableFields(actionFields, rule?.actions, 'Take these actions', !rule);
+    const conditions = configurableFields(predicateFields, rule?.conditions, 'Conditions', 'Add a condition');
+    const exceptions = configurableFields(predicateFields, rule?.exceptions, 'Exceptions', 'Add an exception');
+    const actions = configurableFields(actionFields, rule?.actions, 'Actions', 'Add an action', !rule);
     const exceptionsPanel = element('details');
     exceptionsPanel.append(element('summary', 'Exceptions'), exceptions.section);
     const all = element('input');
@@ -547,7 +616,8 @@
     const meaningful = obj => Object.values(obj).some(value =>
       Array.isArray(value) ? value.length > 0 : value !== null && value !== false && value !== '');
     all.checked = Boolean(rule) && !meaningful(rule.conditions || {});
-    const footer = element('div', '', 'feature-actions');
+    exceptionsPanel.open = Boolean(rule?.exceptions && Object.values(rule.exceptions).some(Boolean));
+    const footer = element('div', '', 'feature-actions rule-footer');
     footer.append(action('Back to rules', advancedRules), action('Save rule', async () => {
       if (!name.value.trim()) throw new Error('Enter a rule name.');
       if (!priority.checkValidity() || !Number.isInteger(Number(priority.value)) || Number(priority.value) < 1) {
@@ -579,11 +649,11 @@
     const allLabel = label('Apply to every incoming message if no condition is set', all);
     allLabel.classList.add('rule-check');
     main.append(general, conditions.section, allLabel, actions.section, exceptionsPanel, footer);
+    name.focus();
   }
 
   async function advancedRules() {
-    const main = panel('Inbox rules');
-    modal.classList.add('feature-wide');
+    const main = rulesPanel('Inbox rules');
     const status = element('p', 'Loading rules…', 'muted');
     main.append(status);
     const result = await send('/api/rules');
