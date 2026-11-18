@@ -158,6 +158,7 @@ def save_account(data, client_id, *, refresh="", managed=False, name=""):
             "used": now,
             "lock": threading.RLock(),
             "pages": {},
+            "search_history": [],
         }
 
 
@@ -170,6 +171,30 @@ def current_account():
             raise MailError("Your session expired. Sign in again.", 401)
         record["used"] = time.time()
         return record
+
+
+@app.route("/api/search-history", methods=["GET", "POST", "DELETE"])
+def search_history():
+    record = current_account()
+    entry = None
+    if request.method == "POST":
+        body = json_body()
+        term = body.get("search")
+        kind = body.get("kind")
+        if not isinstance(term, str) or not term.strip() or len(term) > 250:
+            raise MailError("Enter a search between 1 and 250 characters.")
+        if kind not in ("mail", "people"):
+            raise MailError("Choose Mail or People search.")
+        scope = "all" if kind == "mail" and body.get("scope") == "all" else "folder"
+        entry = {"search": term.strip(), "kind": kind, "scope": scope}
+
+    with record["lock"]:
+        history = record.setdefault("search_history", [])
+        if request.method == "DELETE":
+            history.clear()
+        elif entry:
+            history[:] = [entry, *(item for item in history if item != entry)][:20]
+        return jsonify(items=history)
 
 
 def renew(record):

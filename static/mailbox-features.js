@@ -126,6 +126,38 @@
     return send('/api/features/graph', 'POST', { method, path, payload, query });
   }
 
+  function rememberSearch(search, kind, scope) {
+    if (search && search.length <= 250) {
+      send('/api/search-history', 'POST', {search, kind, scope}).catch(() => {});
+    }
+  }
+
+  async function historyPanel() {
+    const main = panel('Search history');
+    const status = element('p', 'Loading this sign-in’s search history…', 'muted');
+    status.setAttribute('role', 'status');
+    const rows = element('div', '', 'people-list');
+    const clear = action('Clear search history', async () => {
+      if (!confirm('Clear Mail Console search history for this sign-in?')) return;
+      await send('/api/search-history', 'DELETE');
+      rows.replaceChildren();
+      rows.hidden = true;
+      clear.hidden = true;
+      status.textContent = 'Search history cleared.';
+    });
+    clear.hidden = true;
+    rows.hidden = true;
+    main.append(status, clear, rows);
+    const data = await send('/api/search-history');
+    if (!main.isConnected || !modal.open) return;
+    const items = data.items || [];
+    status.textContent = items.length ? 'Recent searches from this sign-in.' : 'No recent searches.';
+    clear.hidden = rows.hidden = !items.length;
+    for (const item of items) {
+      rows.append(element('p', (item.kind === 'people' ? 'People · ' : 'Mail · ') + item.search));
+    }
+  }
+
   function saveFile(file, name) {
     const url = URL.createObjectURL(file);
     const link = element('a');
@@ -788,6 +820,7 @@
     }
     form.onsubmit = event => {
       event.preventDefault();
+      rememberSearch(search.value.trim(), 'people');
       load();
     };
     await load();
@@ -1057,7 +1090,7 @@
     const navigation = element('nav', '', 'feature-apps');
     navigation.setAttribute('aria-label', 'Settings sections');
     navigation.append(action('Inbox rules', advancedRules), action('Mailbox settings', settings),
-      action('Manage folders', folderTools));
+      action('Manage folders', folderTools), action('Search history', historyPanel));
     main.append(navigation);
     const connection = await send('/api/session');
     if (connection.oauth && main.isConnected) {
@@ -1068,6 +1101,13 @@
   }
 
   const header = document.querySelector('body > header');
+  const mailSearchForm = field('searchForm');
+  if (mailSearchForm) {
+    mailSearchForm.addEventListener('submit', () => {
+      rememberSearch(field('search').value.trim(), 'mail', field('scope').value);
+    });
+    mailSearchForm.append(action('Search history', historyPanel));
+  }
   if (header) {
     const apps = element('nav', '', 'feature-apps');
     apps.setAttribute('aria-label','Mail Console apps');
