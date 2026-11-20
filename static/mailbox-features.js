@@ -1239,7 +1239,8 @@
     const status = element('p', 'Checking connection status…', 'muted');
     status.setAttribute('role', 'status');
     const details = element('dl');
-    main.append(status, details, action('Check again', check));
+    const permissions = element('section');
+    main.append(status, details, action('Check again', check), permissions);
 
     const formatTime = value => Number.isFinite(value)
       ? new Date(value * 1000).toLocaleString()
@@ -1267,6 +1268,38 @@
       status.textContent = data.refreshEnabled
         ? 'Mail Console tries to refresh during mailbox requests when the access token is near expiry or Microsoft rejects it.'
         : 'This sign-in has no refresh token. Sign in again when the access token expires.';
+      permissions.replaceChildren(element('h3', 'Microsoft Graph permissions'));
+      if (!Array.isArray(data.graphScopes)) {
+        permissions.append(element('p', 'Permission details are unavailable for this token.'));
+        return;
+      }
+      const granted = new Set(data.graphScopes.map(scope => scope.toLowerCase()));
+      const capabilities = [
+        ['Read full messages and attachments', 'Mail.Read', 'Mail.ReadWrite'],
+        ['Read basic message details', 'Mail.ReadBasic', 'Mail.Read', 'Mail.ReadWrite'],
+        ['Manage messages and drafts', 'Mail.ReadWrite'],
+        ['Send mail', 'Mail.Send'],
+        ['View mailbox settings and rules', 'MailboxSettings.Read', 'MailboxSettings.ReadWrite'],
+        ['Change mailbox settings and rules', 'MailboxSettings.ReadWrite'],
+        ['View contacts', 'Contacts.Read', 'Contacts.ReadWrite'],
+        ['Manage contacts', 'Contacts.ReadWrite'],
+        ['View calendar events', 'Calendars.ReadBasic', 'Calendars.Read', 'Calendars.ReadWrite'],
+        ['Manage calendar events', 'Calendars.ReadWrite'],
+        ['View tasks', 'Tasks.Read', 'Tasks.ReadWrite'],
+        ['Manage tasks', 'Tasks.ReadWrite'],
+        ['View Microsoft people suggestions', 'People.Read'],
+      ];
+      const list = element('dl');
+      for (const [name, ...scopes] of capabilities) {
+        const present = scopes.some(scope => granted.has(scope.toLowerCase()));
+        list.append(element('dt', name), element('dd', present ? 'Scope present' : 'Scope missing'));
+      }
+      const explicit = element('details');
+      explicit.append(element('summary', 'View reported scopes'), element('p',
+        data.graphScopes.join(', ') || 'No delegated Graph scopes reported.'));
+      const source = data.graphScopeSource === 'microsoft_response'
+        ? 'Microsoft sign-in response' : 'access token claims';
+      permissions.append(element('p', 'Source: ' + source + '. Microsoft Graph still checks tenant and mailbox access for each action.', 'muted'), list, explicit);
     }
     await check();
   }

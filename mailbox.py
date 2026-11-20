@@ -156,6 +156,7 @@ def save_account(data, client_id, *, refresh="", managed=False, name=""):
             "client": client_id,
             "managed": managed,
             "scopes": data.get("scope"),
+            "reported_scopes": data.get("scope"),
             "name": name,
             "expires": expires_at(data),
             "used": now,
@@ -222,6 +223,7 @@ def renew(record):
         access=data["access_token"],
         refresh=data.get("refresh_token") or record["refresh"],
         scopes=data.get("scope") or record.get("scopes"),
+        reported_scopes=data.get("scope"),
         expires=expires_at(data),
         last_refresh_success=time.time(),
         last_refresh_result="succeeded",
@@ -508,6 +510,7 @@ def account_info():
 def connection_status():
     record = current_account()
     with record["lock"]:
+        scopes, source = graph_permission_hints(record)
         return jsonify(
             refreshEnabled=bool(record["refresh"]),
             expiresAt=record["expires"],
@@ -515,7 +518,39 @@ def connection_status():
             lastRefreshAttemptAt=record.get("last_refresh_attempt"),
             lastSuccessfulRefreshAt=record.get("last_refresh_success"),
             lastRefreshResult=record.get("last_refresh_result"),
+            graphScopes=scopes,
+            graphScopeSource=source,
         )
+
+
+def graph_permission_hints(record):
+    raw = record.get("reported_scopes")
+    source = "microsoft_response"
+    if not isinstance(raw, str) or not raw.strip():
+        # Claims are display hints only. Graph makes all authorization decisions.
+        source = "access_token_claims"
+        try:
+            token = record["access"]
+            if token.count(".") != 2 or len(token) > 32768:
+                return None, None
+            payload = token.split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        except (ValueError, TypeError, RecursionError):
+            return None, None
+        if not isinstance(claims, dict) or claims.get("aud") not in (
+            "https://graph.microsoft.com", "https://graph.microsoft.com/",
+            "00000003-0000-0000-c000-000000000000",
+        ):
+            return None, None
+        raw = claims.get("scp")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, None
+    scopes = {
+        scope.removeprefix("https://graph.microsoft.com/")
+        for scope in raw.split()
+        if re.fullmatch(r"(?:https://graph\.microsoft\.com/)?[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+", scope)
+    }
+    return sorted(scopes, key=str.casefold), source
 
 
 def next_page(link_value, original_path):
