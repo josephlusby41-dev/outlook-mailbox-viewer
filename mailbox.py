@@ -922,7 +922,7 @@ def mailbox_action():
         (method == "POST" and path == "/me/messages")
         or (method == "PATCH" and MESSAGE_PATH.fullmatch(path))
         or (method == "POST" and re.fullmatch(
-            r"/me/messages/[^/]+/(?:send|reply|replyAll|forward)", path
+                r"/me/messages/[^/]+/(?:send|reply|replyAll|forward|createReply|createReplyAll|createForward)", path
         ))
     )
     if not allowed:

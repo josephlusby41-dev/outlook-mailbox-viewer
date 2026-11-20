@@ -63,7 +63,7 @@ def register_mailbox_features(app, graph, error):
 
         return jsonify(graph(method, path, body.get("query"), body.get("payload")))
 
-    @app.post("/api/features/attachments/<message_id>")
+    @app.post("/api/features/attachments/<path:message_id>")
     def feature_upload(message_id):
         file = request.files.get("file")
         if not file or not file.filename:

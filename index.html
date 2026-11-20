@@ -36,6 +36,9 @@ h1,h2,p{margin-top:0}
 .main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
 .actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .search input{flex:1;min-width:130px}
+.compose-files{padding:9px 0;border-block:1px solid var(--line);margin-top:12px}
+.compose-files ul{padding:0;margin:6px 0;list-style:none}
+.compose-files li{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0;overflow-wrap:anywhere}
 .search-refiners{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:0;padding:0;margin:0}
 .search-refiners legend{float:left;margin:5px 8px 0 0;color:var(--muted);font-weight:600}
 .search-refiners label{display:flex;gap:5px;align-items:center;padding:4px 8px;border:1px solid var(--line);border-radius:14px;background:white}
@@ -561,9 +564,16 @@ function compose(mode = 'new', item) {
   const addressed = editable || mode === 'forward';
   dialog(title, `
     ${addressed ? '<label>To<input id="to" placeholder="Separate addresses with commas"></label>' : ''}
-    ${editable ? '<label>Cc<input id="cc"></label><label>Bcc<input id="bcc"></label><label>Subject<input id="subject"></label>' :
+    ${editable ? '<details id="copyFields"><summary>Cc and Bcc</summary><label>Cc<input id="cc"></label><label>Bcc<input id="bcc"></label></details><label>Subject<input id="subject"></label>' :
       `<p class="muted">${escapeHtml(item.subject || '(no subject)')}</p>`}
     <label>Message<textarea id="body"></textarea></label>
+    <section class="compose-files" aria-label="Attachments">
+      <button type="button" id="attachFiles">Attach files</button>
+      <input type="file" id="composeFiles" multiple hidden>
+      <span class="muted">Under 3 MB per file</span>
+      <ul id="composeFileList"></ul>
+      <p id="composeProgress" class="muted" role="status" hidden></p>
+    </section>
     <div class="actions"><button data-close>Cancel</button>
     ${editable ? '<button id="saveDraft">Save draft</button>' : ''}
     <button class="primary" id="send">Send</button></div>`);
@@ -572,6 +582,7 @@ function compose(mode = 'new', item) {
     for (const [field, key] of [['to','toRecipients'],['cc','ccRecipients'],['bcc','bccRecipients']]) {
       el(field).value = (item[key] || []).map(entry => byAddress(entry).address).filter(Boolean).join(', ');
     }
+    el('copyFields').open = Boolean(el('cc').value || el('bcc').value);
     el('subject').value = item.subject || '';
     if ((item.body?.contentType || '').toLowerCase() === 'html') {
       const plain = new DOMParser().parseFromString(item.safeHtml || '', 'text/html');
@@ -583,7 +594,61 @@ function compose(mode = 'new', item) {
 
   const send = el('send');
   const save = el('saveDraft');
-  const draftPath = mode === 'draft' ? graphUrl(item.id) : '/me/messages';
+  const attach = el('attachFiles');
+  const picker = el('composeFiles');
+  const fileList = el('composeFileList');
+  const progress = el('composeProgress');
+  const composeDialog = el('dialog');
+  const cancel = composeDialog.querySelector('[data-close]');
+  const errors = el('dialogError');
+  let draftId = mode === 'draft' ? item.id : null;
+  let replyBody;
+  const attachments = [];
+  let busy = false;
+
+  attach.onclick = () => picker.click();
+  picker.onchange = () => {
+    const invalid = [];
+    for (const file of picker.files) {
+      if (!file.size || file.size >= 3000000) invalid.push(file.name);
+      else attachments.push({file, id:null});
+    }
+    errors.textContent = invalid.length ? 'Skipped empty or oversized files: ' + invalid.join(', ') : '';
+    picker.value = '';
+    renderFiles();
+  };
+
+  function renderFiles() {
+    fileList.replaceChildren();
+    for (const entry of attachments) {
+      const row = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = entry.file.name + ' · ' + Math.max(1, Math.round(entry.file.size / 1024)) + ' KB';
+      const remove = button('Remove', async () => {
+        if (busy) return;
+        if (entry.id) {
+          busy = true;
+          send.disabled = attach.disabled = true;
+          if (save) save.disabled = true;
+          try {
+            await api('/api/features/graph', 'POST', {
+              method:'DELETE', path:graphUrl(draftId) + '/attachments/' + encodeURIComponent(entry.id),
+            });
+          } finally {
+            busy = false;
+            send.disabled = attach.disabled = false;
+            if (save) save.disabled = false;
+          }
+        }
+        attachments.splice(attachments.indexOf(entry), 1);
+        renderFiles();
+      });
+      remove.disabled = busy;
+      remove.setAttribute('aria-label', 'Remove ' + entry.file.name);
+      row.append(name, remove);
+      fileList.append(row);
+    }
+  }
 
   function fields() {
     return {
@@ -593,19 +658,76 @@ function compose(mode = 'new', item) {
   }
 
   async function saveDraft(values) {
-    return graph(mode === 'draft' ? 'PATCH' : 'POST', draftPath, {
+    const payload = {
       subject: values.subject,
       body: {contentType:'Text', content:values.body},
       toRecipients: recipients(values.to),
       ccRecipients: recipients(values.cc),
       bccRecipients: recipients(values.bcc),
-    });
+    };
+    if (draftId) {
+      await graph('PATCH', graphUrl(draftId), payload);
+    } else {
+      const draft = await graph('POST', '/me/messages', payload);
+      if (!draft.id) throw new Error('Microsoft did not return the draft ID. Check Drafts before retrying.');
+      draftId = draft.id;
+    }
+    await uploadFiles();
+  }
+
+  async function uploadFiles() {
+    for (const entry of attachments) {
+      if (entry.id) continue;
+      progress.hidden = false;
+      progress.textContent = 'Attaching ' + entry.file.name + '…';
+      const data = new FormData();
+      data.append('file', entry.file);
+      const response = await fetch('/api/features/attachments/' + encodeURIComponent(draftId), {
+        method:'POST', headers:{'X-CSRF-Token':CSRF}, body:data,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.id) {
+        throw new Error(result.message || ('Could not attach ' + entry.file.name + '. Try again.'));
+      }
+      entry.id = result.id;
+    }
+  }
+
+  async function saveReplyDraft(values) {
+    if (!draftId) {
+      const create = {reply:'createReply', replyAll:'createReplyAll', forward:'createForward'}[mode];
+      const payload = mode === 'forward' ? {toRecipients:recipients(values.to)} : {};
+      const draft = await graph('POST', graphUrl(item.id) + '/' + create, payload);
+      if (!draft.id) throw new Error('Microsoft did not return the draft ID. Check Drafts before retrying.');
+      draftId = draft.id;
+      replyBody = draft.body;
+    }
+    const quote = replyBody?.content || '';
+    const html = replyBody?.contentType?.toLowerCase() === 'html';
+    const comment = '<div>' + escapeHtml(values.body).replace(/\r?\n/g, '<br>') + '</div>';
+    const body = html
+      ? {contentType:'HTML', content:/<body\b[^>]*>/i.test(quote)
+        ? quote.replace(/<body\b[^>]*>/i, start => start + comment)
+        : comment + quote}
+      : {contentType:'Text', content: [values.body, quote].filter(Boolean).join('\n\n')};
+    const payload = {body};
+    if (mode === 'forward') payload.toRecipients = recipients(values.to);
+    await graph('PATCH', graphUrl(draftId), payload);
+    await uploadFiles();
   }
 
   async function submit(action, message) {
+    if (busy) return;
+    busy = true;
+    attach.disabled = cancel.disabled = true;
+    const preventClose = event => event.preventDefault();
+    composeDialog.addEventListener('cancel', preventClose);
     send.disabled = true;
     if (save) save.disabled = true;
-    el('dialogError').textContent = '';
+    errors.textContent = '';
+    progress.hidden = false;
+    progress.textContent = message === 'Sent.' ? 'Sending…' : 'Saving draft…';
+    renderFiles();
     try {
       await action(fields());
       if (send.isConnected) el('dialog').close();
@@ -614,25 +736,47 @@ function compose(mode = 'new', item) {
     } catch (error) {
       notice(error.message);
     } finally {
+      busy = false;
+      attach.disabled = cancel.disabled = false;
+      composeDialog.removeEventListener('cancel', preventClose);
+      progress.hidden = true;
       send.disabled = false;
       if (save) save.disabled = false;
+      renderFiles();
     }
   }
 
   if (save) save.onclick = () => submit(saveDraft, 'Draft saved.');
   send.onclick = () => submit(async values => {
     if (addressed && !recipients(values.to).length) throw new Error('Enter at least one recipient.');
-    if (mode === 'new') {
+    if (mode === 'new' && !draftId && !attachments.length) {
       await api('/api/send', 'POST', values);
-    } else if (mode === 'draft') {
+    } else if (editable) {
       await saveDraft(values);
-      await graph('POST', draftPath + '/send');
+      progress.textContent = 'Sending…';
+      await graph('POST', graphUrl(draftId) + '/send');
+    } else if (draftId || attachments.length) {
+      await saveReplyDraft(values);
+      progress.textContent = 'Sending…';
+      await graph('POST', graphUrl(draftId) + '/send');
     } else {
       const payload = {comment:values.body};
       if (mode === 'forward') payload.toRecipients = recipients(values.to);
       await graph('POST', graphUrl(item.id) + '/' + mode, payload);
     }
   }, 'Sent.');
+
+  if (mode === 'draft' && item.hasAttachments) {
+    api('/api/messages/' + encodeURIComponent(item.id) + '/attachments').then(result => {
+      if (!fileList.isConnected || !composeDialog.open) return;
+      for (const file of result.attachments || []) {
+        if (!file.isInline) attachments.push({file, id:file.id});
+      }
+      renderFiles();
+    }).catch(error => {
+      if (fileList.isConnected && composeDialog.open) errors.textContent = error.message;
+    });
+  }
 }
 
 el('searchForm').onsubmit = event => { event.preventDefault(); loadMail(); };
