@@ -124,6 +124,7 @@ dialog .actions{margin-top:12px}
       <button id="move">Move…</button>
       <button id="remove" class="danger">Delete</button>
       <button id="restore" hidden>Restore to Inbox</button>
+      <button id="permanentDelete" class="danger" hidden>Delete permanently</button>
     </div>
     <div class="panes" id="panes">
       <section class="list" aria-labelledby="folderName">
@@ -321,10 +322,11 @@ function updateSelection() {
   const size = state.selected.size;
   el('selectAll').checked = size > 0 && size === state.mail.length;
   el('selectAll').indeterminate = size > 0 && !el('selectAll').checked;
-  for (const id of ['readAll','unreadAll','archive','move','remove','restore']) el(id).disabled = !size;
+  for (const id of ['readAll','unreadAll','archive','move','remove','restore','permanentDelete']) el(id).disabled = !size;
   const deletedView = isDeletedFolder(new URLSearchParams(state.query).get('folder') || state.folder);
   el('remove').hidden = deletedView;
   el('restore').hidden = !deletedView;
+  el('permanentDelete').hidden = !deletedView;
 }
 
 function isDeletedFolder(id) {
@@ -333,6 +335,10 @@ function isDeletedFolder(id) {
 
 function restoreMessage(id) {
   return api(messageUrl(id) + '/move', 'POST', {destinationId:'inbox'});
+}
+
+function permanentlyDelete(id) {
+  return api(messageUrl(id) + '/permanent-delete', 'POST', {confirmed:true});
 }
 
 async function loadMail(append = false) {
@@ -503,6 +509,12 @@ async function openMessage(id) {
           notice('Moved to Deleted Items.');
           await refresh();
         }, 'danger'));
+    if (deleted) actions.append(button('Delete permanently', async () => {
+      if (!confirm('Permanently delete this message? You cannot restore it from Deleted Items.')) return;
+      await permanentlyDelete(id);
+      notice('Permanently deleted.');
+      await refresh();
+    }, 'danger'));
 
     const files = document.createElement('div');
     files.className = 'actions';
@@ -827,6 +839,17 @@ el('remove').onclick = () => {
   }
 };
 el('restore').onclick = () => bulk([...state.selected], restoreMessage, 'Restored to Inbox:');
+el('permanentDelete').onclick = async () => {
+  const ids = [...state.selected];
+  if (!ids.length || !confirm(`Permanently delete ${ids.length} selected message(s)? You cannot restore them from Deleted Items.`)) return;
+  const control = el('permanentDelete');
+  control.disabled = true;
+  try {
+    await bulk(ids, permanentlyDelete, 'Permanently deleted');
+  } finally {
+    updateSelection();
+  }
+};
 el('selectAll').onchange = event => {
   state.selected = new Set(event.target.checked ? state.mail.map(item => item.id) : []);
   renderMail();

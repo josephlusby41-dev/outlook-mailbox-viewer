@@ -886,6 +886,27 @@ def delete_message(mid):
     return jsonify(ok=True)
 
 
+@app.post("/api/messages/<path:mid>/permanent-delete")
+def permanently_delete_message(mid):
+    if json_body().get("confirmed") is not True:
+        raise MailError("Confirm permanent deletion before continuing.")
+
+    account = current_account()
+    path = message_path(mid)
+    with account["lock"]:
+        deleted_id = account.get("deleted_items_id")
+        if not deleted_id:
+            deleted_id = graph("GET", "/me/mailFolders/deleteditems", {"$select": "id"}).get("id")
+            if not deleted_id:
+                raise MailError("Could not identify Deleted Items.", 502)
+            account["deleted_items_id"] = deleted_id
+        message = graph("GET", path, {"$select": "parentFolderId"})
+        if message.get("parentFolderId") != deleted_id:
+            raise MailError("Move the message to Deleted Items first.", 409)
+        graph("POST", path + "/permanentDelete")
+    return jsonify(ok=True)
+
+
 @app.post("/api/messages/<path:mid>/read")
 def mark_read(mid):
     value = json_body().get("isRead", True)
