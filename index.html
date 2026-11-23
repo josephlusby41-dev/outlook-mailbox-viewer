@@ -123,6 +123,7 @@ dialog .actions{margin-top:12px}
       <button id="archive">Archive</button>
       <button id="move">Move…</button>
       <button id="remove" class="danger">Delete</button>
+      <button id="restore" hidden>Restore to Inbox</button>
     </div>
     <div class="panes" id="panes">
       <section class="list" aria-labelledby="folderName">
@@ -147,7 +148,7 @@ const el = id => document.getElementById(id);
 const state = {
   folder: 'inbox', roots: [], children: new Map(), expanded: new Set(),
   mail: [], selected: new Set(), cursor: null, query: '', open: null,
-  listVersion: 0, readerVersion: 0, folderVersion: 0,
+  listVersion: 0, readerVersion: 0, folderVersion: 0, deletedItemsId: null,
 };
 const escapeHtml = value => String(value ?? '').replace(
   /[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]),
@@ -281,12 +282,15 @@ async function loadFolders() {
     const result = await api('/api/folders');
     if (version !== state.folderVersion) return;
     state.roots = result.folders || [];
+    state.deletedItemsId = result.deletedItemsId || state.deletedItemsId
+      || state.roots.find(folder => /^deleted items$/i.test(folder.displayName))?.id || null;
     const inbox = state.roots.find(folder => /^inbox$/i.test(folder.displayName));
     if (inbox) {
       if (state.folder === 'inbox') state.folder = inbox.id;
       state.roots.sort((a, b) => Number(b === inbox) - Number(a === inbox));
     }
     renderFolders();
+    updateSelection();
 
     const expanded = [...state.expanded];
     await Promise.all(expanded.map(async id => {
@@ -317,7 +321,18 @@ function updateSelection() {
   const size = state.selected.size;
   el('selectAll').checked = size > 0 && size === state.mail.length;
   el('selectAll').indeterminate = size > 0 && !el('selectAll').checked;
-  for (const id of ['readAll','unreadAll','archive','move','remove']) el(id).disabled = !size;
+  for (const id of ['readAll','unreadAll','archive','move','remove','restore']) el(id).disabled = !size;
+  const deletedView = isDeletedFolder(new URLSearchParams(state.query).get('folder') || state.folder);
+  el('remove').hidden = deletedView;
+  el('restore').hidden = !deletedView;
+}
+
+function isDeletedFolder(id) {
+  return id === 'deleteditems' || Boolean(id && id === state.deletedItemsId);
+}
+
+function restoreMessage(id) {
+  return api(messageUrl(id) + '/move', 'POST', {destinationId:'inbox'});
 }
 
 async function loadMail(append = false) {
@@ -333,7 +348,8 @@ async function loadMail(append = false) {
     const refiners = [...el('refiners').querySelectorAll(':checked')];
     const wholeMailbox = Boolean(search || refiners.length) && el('scope').value === 'all';
     const folder = allFolders().find(item => item.id === state.folder);
-    query.set('folder', wholeMailbox ? 'all' : state.folder);
+    const folderId = isDeletedFolder(state.folder) ? 'deleteditems' : state.folder;
+    query.set('folder', wholeMailbox ? 'all' : folderId);
     if (search) query.set('search', search);
     for (const refiner of refiners) query.append('refine', refiner.value);
     el('folderName').textContent = search || refiners.length
@@ -472,12 +488,21 @@ async function openMessage(id) {
         renderMail();
         if (state.readerVersion === version) await openMessage(id);
       }),
-      button('Delete', async () => {
-        if (!confirm('Delete this message?')) return;
-        await api(messageUrl(id), 'DELETE');
-        await refresh();
-      }, 'danger'),
     );
+    const deleted = isDeletedFolder(item.parentFolderId)
+      || isDeletedFolder(new URLSearchParams(state.query).get('folder'));
+    actions.append(deleted
+      ? button('Restore to Inbox', async () => {
+          await restoreMessage(id);
+          notice('Restored to Inbox.');
+          await refresh();
+        })
+      : button('Delete', async () => {
+          if (!confirm('Move this message to Deleted Items?')) return;
+          await api(messageUrl(id), 'DELETE');
+          notice('Moved to Deleted Items.');
+          await refresh();
+        }, 'danger'));
 
     const files = document.createElement('div');
     files.className = 'actions';
@@ -797,10 +822,11 @@ el('archive').onclick = () => bulk([...state.selected],
   id => api(messageUrl(id) + '/move', 'POST', {destinationId:'archive'}), 'Archived');
 el('remove').onclick = () => {
   const ids = [...state.selected];
-  if (ids.length && confirm(`Delete ${ids.length} selected message(s)?`)) {
-    bulk(ids, id => api(messageUrl(id), 'DELETE'), 'Deleted');
+  if (ids.length && confirm(`Move ${ids.length} selected message(s) to Deleted Items?`)) {
+    bulk(ids, id => api(messageUrl(id), 'DELETE'), 'Moved to Deleted Items:');
   }
 };
+el('restore').onclick = () => bulk([...state.selected], restoreMessage, 'Restored to Inbox:');
 el('selectAll').onchange = event => {
   state.selected = new Set(event.target.checked ? state.mail.map(item => item.id) : []);
   renderMail();

@@ -52,7 +52,7 @@ PROFILE_FIELDS = "displayName,mail,userPrincipalName"
 FOLDER_FIELDS = "id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
 MESSAGE_FIELDS = (
     "id,subject,from,toRecipients,receivedDateTime,sentDateTime,isRead,"
-    "hasAttachments,bodyPreview,importance,flag,isDraft"
+    "hasAttachments,bodyPreview,importance,flag,isDraft,parentFolderId"
 )
 RULES = "/me/mailFolders/inbox/messageRules"
 PAGE_LIFETIME = 1800
@@ -665,7 +665,20 @@ def folders():
     path = "/me/mailFolders"
     if parent:
         path += f"/{quote(parent, safe='')}/childFolders"
-    return jsonify(folders=collection(path, {"$top": 100, "$select": FOLDER_FIELDS}))
+    entries = collection(path, {"$top": 100, "$select": FOLDER_FIELDS})
+    if parent:
+        return jsonify(folders=entries)
+    record = current_account()
+    with record["lock"]:
+        deleted_items_id = record.get("deleted_items_id")
+        if not deleted_items_id:
+            try:
+                deleted_items_id = graph("GET", "/me/mailFolders/deleteditems", {"$select": "id"}).get("id")
+            except (MailError, requests.RequestException):
+                deleted_items_id = None
+            if deleted_items_id:
+                record["deleted_items_id"] = deleted_items_id
+    return jsonify(folders=entries, deletedItemsId=deleted_items_id)
 
 
 @app.get("/api/people")
@@ -787,6 +800,8 @@ def messages():
         query["$search"] = f'"{search}"'
     elif unread:
         query["$filter"] = "isRead eq false"
+    elif folder == "deleteditems":
+        query["$orderby"] = "lastModifiedDateTime desc"
     else:
         query["$orderby"] = "receivedDateTime desc"
 
@@ -867,7 +882,7 @@ def message(mid):
 
 @app.delete("/api/messages/<path:mid>")
 def delete_message(mid):
-    graph("DELETE", message_path(mid))
+    graph("POST", message_path(mid) + "/move", payload={"destinationId": "deleteditems"})
     return jsonify(ok=True)
 
 
