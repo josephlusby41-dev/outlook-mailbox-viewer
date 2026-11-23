@@ -601,7 +601,7 @@ def graph_page_url(value, original_path):
             "/v1.0/me", link.path, flags=re.I,
         )
         canonical = re.sub(
-            r"/(contactFolders|childFolders)\('([^/']+)'\)", r"/\1/\2",
+            r"/(contactFolders|mailFolders|childFolders)\('([^/']+)'\)", r"/\1/\2",
             canonical, flags=re.I,
         )
         valid_resource = unquote(canonical).rstrip("/").casefold() == (
@@ -649,13 +649,21 @@ def get_page(record, key, view):
 def collection(path, query=None):
     rows = []
     original = path
+    folder_collection = path == "/me/mailFolders" or path.endswith("/childFolders")
+    page_url = None
     for _ in range(100):
-        result = graph("GET", path, query)
+        if page_url:
+            result = graph("GET", original, continuation=page_url)
+        else:
+            result = graph("GET", path, query)
         rows.extend(result.get("value") or [])
         continuation = result.get("@odata.nextLink")
         if not continuation:
             return rows
-        path, query = next_page(continuation, original)
+        if folder_collection:
+            page_url = graph_page_url(continuation, original)
+        else:
+            path, query = next_page(continuation, original)
     raise MailError("Microsoft returned too many pages.", 502)
 
 

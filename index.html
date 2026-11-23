@@ -98,6 +98,7 @@ dialog .actions{margin-top:12px}
   <aside class="sidebar" aria-label="Mailbox navigation">
     <button class="primary" id="newMail">＋ New mail</button>
     <h2>Folders</h2>
+    <p id="folderStatus" class="muted" role="status" hidden></p>
     <nav id="folders" aria-label="Mail folders"></nav>
   </aside>
   <main class="main">
@@ -222,6 +223,18 @@ function dateLabel(value, short = false) {
     : date.toLocaleString();
 }
 
+const childFolderRequests = new Map();
+
+function fetchChildFolders(id) {
+  if (!childFolderRequests.has(id)) {
+    const pending = api('/api/folders?' + new URLSearchParams({parent:id}))
+      .then(result => result.folders || [])
+      .finally(() => childFolderRequests.delete(id));
+    childFolderRequests.set(id, pending);
+  }
+  return childFolderRequests.get(id);
+}
+
 function renderFolders() {
   const nav = el('folders');
   nav.replaceChildren();
@@ -236,8 +249,7 @@ function renderFolders() {
         const toggle = button(expanded ? '▾' : '▸', async () => {
           if (!state.expanded.delete(folder.id)) {
             if (!state.children.has(folder.id)) {
-              const result = await api('/api/folders?' + new URLSearchParams({parent:folder.id}));
-              state.children.set(folder.id, result.folders || []);
+              state.children.set(folder.id, await fetchChildFolders(folder.id));
             }
             state.expanded.add(folder.id);
           }
@@ -293,21 +305,47 @@ async function loadFolders() {
     renderFolders();
     updateSelection();
 
-    const expanded = [...state.expanded];
-    await Promise.all(expanded.map(async id => {
-      try {
-        const child = await api('/api/folders?' + new URLSearchParams({parent:id}));
-        if (version === state.folderVersion && state.expanded.has(id)) {
-          state.children.set(id, child.folders || []);
-        }
-      } catch (error) {
-        if (version === state.folderVersion) notice(error.message);
-      }
-    }));
-    if (expanded.length && version === state.folderVersion) renderFolders();
+    discoverSubfolders(version);
   } catch (error) {
     if (version === state.folderVersion) notice(error.message);
   }
+}
+
+async function discoverSubfolders(version) {
+  const status = el('folderStatus');
+  const queue = [...state.roots];
+  const visited = new Set();
+  const failed = [];
+  status.hidden = !queue.some(folder => folder.childFolderCount);
+  status.textContent = 'Loading subfolders…';
+  for (let index = 0; index < queue.length; index++) {
+    if (version !== state.folderVersion) return;
+    const folder = queue[index];
+    if (!folder.id || visited.has(folder.id)) continue;
+    visited.add(folder.id);
+    if (!folder.childFolderCount) continue;
+    try {
+      const children = await fetchChildFolders(folder.id);
+      if (version !== state.folderVersion) return;
+      if (children.length && !state.children.has(folder.id)) state.expanded.add(folder.id);
+      state.children.set(folder.id, children);
+      queue.push(...children);
+      renderFolders();
+    } catch (error) {
+      failed.push(folder.displayName || 'Unnamed folder');
+      queue.push(...(state.children.get(folder.id) || []));
+    }
+  }
+  if (version !== state.folderVersion) return;
+  const branches = new Set(queue.filter(folder => folder.childFolderCount).map(folder => folder.id));
+  for (const id of state.children.keys()) {
+    if (branches.has(id)) continue;
+    state.children.delete(id);
+    state.expanded.delete(id);
+  }
+  renderFolders();
+  status.hidden = !failed.length;
+  status.textContent = failed.length ? 'Could not load subfolders for ' + failed.join(', ') + '. Use Refresh to retry.' : '';
 }
 
 function closeReader() {
