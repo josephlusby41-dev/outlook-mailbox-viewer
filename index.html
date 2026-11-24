@@ -36,6 +36,7 @@ h1,h2,p{margin-top:0}
 .main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
 .actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .search input{flex:1;min-width:130px}
+.compose-preview{width:100%;height:300px;border:1px solid var(--line);border-radius:8px;background:white}
 .compose-files{padding:9px 0;border-block:1px solid var(--line);margin-top:12px}
 .compose-files ul{padding:0;margin:6px 0;list-style:none}
 .compose-files li{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0;overflow-wrap:anywhere}
@@ -641,7 +642,15 @@ function compose(mode = 'new', item) {
     ${addressed ? '<label>To<input id="to" placeholder="Separate addresses with commas"></label>' : ''}
     ${editable ? '<details id="copyFields"><summary>Cc and Bcc</summary><label>Cc<input id="cc"></label><label>Bcc<input id="bcc"></label></details><label>Subject<input id="subject"></label>' :
       `<p class="muted">${escapeHtml(item.subject || '(no subject)')}</p>`}
-    <label>Message<textarea id="body"></textarea></label>
+    <label>Message format<select id="bodyFormat">
+      <option value="Text">Plain text</option><option value="HTML">HTML</option>
+    </select></label>
+    <label><span id="bodyLabel">Message</span><textarea id="body"></textarea></label>
+    <details id="htmlPreview" hidden>
+      <summary>Preview HTML</summary>
+      <p class="muted">External images are hidden in preview. Email apps may render formatting differently.</p>
+      <iframe class="compose-preview" title="HTML message preview" sandbox="" referrerpolicy="no-referrer"></iframe>
+    </details>
     <section class="compose-files" aria-label="Attachments">
       <button type="button" id="attachFiles">Attach files</button>
       <input type="file" id="composeFiles" multiple hidden>
@@ -659,13 +668,29 @@ function compose(mode = 'new', item) {
     }
     el('copyFields').open = Boolean(el('cc').value || el('bcc').value);
     el('subject').value = item.subject || '';
-    if ((item.body?.contentType || '').toLowerCase() === 'html') {
-      const plain = new DOMParser().parseFromString(item.safeHtml || '', 'text/html');
-      el('body').value = plain.body.textContent;
+    el('bodyFormat').value = item.body?.contentType?.toLowerCase() === 'html' ? 'HTML' : 'Text';
+    el('body').value = item.body?.content || '';
+  }
+
+  const format = el('bodyFormat');
+  const editor = el('body');
+  const preview = el('htmlPreview');
+  const previewFrame = preview.querySelector('iframe');
+  function updatePreview() {
+    const htmlMode = format.value === 'HTML';
+    el('bodyLabel').textContent = htmlMode ? 'Message HTML' : 'Message';
+    editor.placeholder = htmlMode ? 'Paste HTML source here' : '';
+    preview.hidden = !htmlMode;
+    if (htmlMode && preview.open) {
+      previewFrame.srcdoc = `<!doctype html><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
+        ${editor.value}`;
     } else {
-      el('body').value = item.body?.content || '';
+      previewFrame.removeAttribute('srcdoc');
     }
   }
+  format.onchange = editor.oninput = preview.ontoggle = updatePreview;
+  updatePreview();
 
   const send = el('send');
   const save = el('saveDraft');
@@ -728,14 +753,14 @@ function compose(mode = 'new', item) {
   function fields() {
     return {
       to:el('to')?.value || '', cc:el('cc')?.value || '', bcc:el('bcc')?.value || '',
-      subject:el('subject')?.value || '', body:el('body').value,
+      subject:el('subject')?.value || '', body:editor.value, contentType:format.value,
     };
   }
 
   async function saveDraft(values) {
     const payload = {
       subject: values.subject,
-      body: {contentType:'Text', content:values.body},
+      body: {contentType:values.contentType, content:values.body},
       toRecipients: recipients(values.to),
       ccRecipients: recipients(values.cc),
       bccRecipients: recipients(values.bcc),
@@ -778,12 +803,14 @@ function compose(mode = 'new', item) {
       replyBody = draft.body;
     }
     const quote = replyBody?.content || '';
-    const html = replyBody?.contentType?.toLowerCase() === 'html';
-    const comment = '<div>' + escapeHtml(values.body).replace(/\r?\n/g, '<br>') + '</div>';
-    const body = html
-      ? {contentType:'HTML', content:/<body\b[^>]*>/i.test(quote)
+    const quoteIsHtml = replyBody?.contentType?.toLowerCase() === 'html';
+    const html = values.contentType === 'HTML';
+    const asHtml = text => escapeHtml(text).replace(/\r?\n/g, '<br>');
+    const comment = html ? values.body : '<div>' + asHtml(values.body) + '</div>';
+    const body = html || quoteIsHtml
+      ? {contentType:'HTML', content:quoteIsHtml && /<body\b[^>]*>/i.test(quote)
         ? quote.replace(/<body\b[^>]*>/i, start => start + comment)
-        : comment + quote}
+        : comment + (quoteIsHtml ? quote : quote ? '<div>' + asHtml(quote) + '</div>' : '')}
       : {contentType:'Text', content: [values.body, quote].filter(Boolean).join('\n\n')};
     const payload = {body};
     if (mode === 'forward') payload.toRecipients = recipients(values.to);
@@ -830,7 +857,7 @@ function compose(mode = 'new', item) {
       await saveDraft(values);
       progress.textContent = 'Sending…';
       await graph('POST', graphUrl(draftId) + '/send');
-    } else if (draftId || attachments.length) {
+    } else if (draftId || attachments.length || values.contentType === 'HTML') {
       await saveReplyDraft(values);
       progress.textContent = 'Sending…';
       await graph('POST', graphUrl(draftId) + '/send');

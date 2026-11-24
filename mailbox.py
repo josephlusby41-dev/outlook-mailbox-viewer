@@ -988,10 +988,13 @@ def send_message():
     to = recipients(body.get("to"))
     if not to:
         raise MailError("Enter at least one recipient.")
+    content_type = body.get("contentType", "Text")
+    if content_type not in ("Text", "HTML"):
+        raise MailError("Choose Plain text or HTML for the message format.")
     graph("POST", "/me/sendMail", payload={
         "message": {
             "subject": str(body.get("subject") or ""),
-            "body": {"contentType": "Text", "content": str(body.get("body") or "")},
+            "body": {"contentType": content_type, "content": str(body.get("body") or "")},
             "toRecipients": to,
             "ccRecipients": recipients(body.get("cc")),
             "bccRecipients": recipients(body.get("bcc")),
