@@ -574,12 +574,18 @@ async function openMessage(id) {
       frame.setAttribute('sandbox', '');
       frame.referrerPolicy = 'no-referrer';
       details.append(summary, note, frame);
-      details.ontoggle = () => {
+      const updateView = () => {
+        summary.textContent = details.open ? 'Switch to simplified view' : 'Preview original HTML';
         body.hidden = details.open;
         if (details.open) frame.srcdoc = htmlPreviewDocument(item.body.content);
         else frame.removeAttribute('srcdoc');
       };
+      const folderId = item.parentFolderId || state.folder;
+      const folder = allFolders().find(entry => entry.id === folderId);
+      details.open = folderId === 'sentitems' || /^sent items$/i.test(folder?.displayName || '');
+      details.ontoggle = updateView;
       body.before(details);
+      updateView();
     }
 
     if (item.hasAttachments) await showFiles(id, files);
