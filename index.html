@@ -561,6 +561,26 @@ async function openMessage(id) {
     body.className = 'message-body';
     body.innerHTML = item.safeHtml || escapeHtml(item.bodyPreview);
     reader.replaceChildren(back, header, actions, files, body);
+    if (item.body?.contentType?.toLowerCase() === 'html' && item.body.content) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Preview original HTML';
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = 'Shows the HTML returned by Outlook. Remote images are blocked in this preview.';
+      const frame = document.createElement('iframe');
+      frame.className = 'compose-preview';
+      frame.title = 'Original message HTML preview';
+      frame.setAttribute('sandbox', '');
+      frame.referrerPolicy = 'no-referrer';
+      details.append(summary, note, frame);
+      details.ontoggle = () => {
+        body.hidden = details.open;
+        if (details.open) frame.srcdoc = htmlPreviewDocument(item.body.content);
+        else frame.removeAttribute('srcdoc');
+      };
+      body.before(details);
+    }
 
     if (item.hasAttachments) await showFiles(id, files);
   } catch (error) {
@@ -634,6 +654,12 @@ function recipients(raw) {
     .map(address => ({emailAddress:{address}}));
 }
 
+function htmlPreviewDocument(markup) {
+  return `<!doctype html><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
+    ${markup}`;
+}
+
 function compose(mode = 'new', item) {
   const title = {new:'New mail',draft:'Edit draft',reply:'Reply',replyAll:'Reply all',forward:'Forward'}[mode];
   const editable = mode === 'new' || mode === 'draft';
@@ -682,9 +708,7 @@ function compose(mode = 'new', item) {
     editor.placeholder = htmlMode ? 'Paste HTML source here' : '';
     preview.hidden = !htmlMode;
     if (htmlMode && preview.open) {
-      previewFrame.srcdoc = `<!doctype html><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
-        ${editor.value}`;
+      previewFrame.srcdoc = htmlPreviewDocument(editor.value);
     } else {
       previewFrame.removeAttribute('srcdoc');
     }
